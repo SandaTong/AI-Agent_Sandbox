@@ -1,2 +1,218 @@
-# AI-Agent_Sandbox
-A sandbox demo for AI agent
+# AI-Agent Sandbox （Windows）
+
+> 一个**为 AI Agent 提供安全运行环境**的 Windows 沙箱学习/演示工程。  
+> 用现代 C++17 + Win32 底层 API 从零搭建，逐 milestone 覆盖**进程管控 / 文件隔离 / 网络管控 / 注入与反注入 / Windows NT 底层机制** 五大能力块。
+
+---
+
+## 1. 这个工程是什么
+
+一句话：**"给 AI Agent 建一个装了铁笼、装了摄像头、装了红外围栏的沙箱进程"**。
+
+背景：AI Agent（比如可执行任意命令的 Copilot）跑起来时，其行为对用户是**不可预测的**——它可能要读文件、发网络、调命令行、装库、写代码。让这样一个"人格不完全可控"的进程直接跑在用户机器上，**风险等价于让一个陌生人拿着 admin token 登录你的电脑**。
+
+沙箱要做的事：
+
+- **进程管控**：把 Agent 关到Job Object 里，限制 CPU/内存/进程数/UI；用 Low IL Token + AppContainer 剥掉权限；用 Mitigation Policy 让它加载不了非签名 DLL / 起不了子进程 / 分配不了动态代码
+- **文件系统隔离**：Agent 只能访问自己的沙盒目录，读系统关键路径要经过 Broker 代理；内核态用 Minifilter 做兜底拦截
+- **网络访问控制**：Agent 想联网必须走白名单（进程 + IP + 端口 + 协议 + 域名维度），用户态 WFP 是主战场
+- **注入 / 反注入**：Agent 进程自己被反注入保护；Agent 想反过来注入宿主也拦
+- **权限收敛与异常隔离**：Access Token / IL / Job / Winstation-Desktop 四层围栏；Agent 崩了不影响 Broker
+
+工程对应的招聘方向：**桌面端Agent Sandbox 研发（Windows 方向）**。
+
+---
+
+## 2. 架构（当前 + 目标态）
+
+### 目标态（20 天后完整版）
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                            Broker.exe                │
+│  ┌────────────┐  ┌────────────┐  ┌────────────┐  ┌───────────┐  │
+│  │Policy      │  │File Broker │  │WFP Engine  │  │Anti-Inject│  │
+│  │Engine      │  │(user-mode) │  │(netACL)   │  │Detector   │  │
+│  └────────────┘  └────────────┘  └────────────┘  └───────────┘  │
+│         ▲                                                       │
+│         │ Named-Pipe IPC (msg framing)                          │
+│         ▼                                                       │
+│  ┌───────────────────────────── Target.exe ─────────────────────┐│
+│  │ Job Object + Low IL + AppContainer + Mitigation + AltDesktop││
+│  │       Agent code runs here (LLM tool-use / shell / net)     ││
+│  └─────────────────────────────────────────────────────────────┘│
+└─────────────────────────────────┬───────────────────────────────┘
+                                  │  DeviceIoControl
+                                  ▼
+                    ┌───────────────────────────┐
+                    │ sandbox_flt.sys (kernel)│
+                    │  Minifilter：拦文件 IRP│
+                    └───────────────────────────┘
+```
+
+### 当前态（M0，已完成）
+
+```
+    ┌──────────── m0_demo.exe ────────────┐
+    │  JobManager  +  TokenManager        │
+    │       │              │              │
+    │       └──ProcessLauncher───────┐│
+    │                                │    │
+    │  CreateProcessAsUserW│    │
+    │    (CREATE_SUSPENDED)          │    │
+    │    → AssignProcessToJobObject│    │
+    │    → ResumeThread              │    │
+    └────────────────────────────────┼────┘
+                                     ▼
+                              target.exe (被 job 关起来)
+```
+
+---
+
+## 3. Roadmap（20 天 × 11 个 milestone）
+
+| Day | Milestone | 交付物 | JD 命中 | 状态 |
+|---|---|---|---|---|
+| D1 | **M0** 基础闭环 | Job / Token / CREATE_SUSPENDED 三步舞 | W1 | ✅ 完成 |
+| D2-3 | **M1** 进程加固 | Low IL + STARTUPINFOEX + 8 项 Mitigation Policy + Alternate Desktop | W1 | ⏳ 待开工 |
+| D4-5 | **M2** 现代沙箱 | AppContainer / LowBox Token + Capability SID | W1 | ⏳ |
+| D6 | **M3** Broker/Target 双进程 + Named-Pipe IPC | 拆成 `broker.exe` + `target.exe` | W1/W5 | ⏳ |
+| D7-8 | **M4** 注入与 Hook（正向） | `injector.exe` + MinHook 拦截 `CreateFileW` | W4 | ⏳ |
+| D9 | **M5** 反注入与运行时检测 | `LdrRegisterDllNotification` + 模块白名单 + 远程线程检测 | W4 | ⏳ |
+| D10-12 | **M6** WFP 网络管控 | 用户态 WFP：进程 + IP + 端口 + 协议 白/黑名单 | W3 | ⏳ |
+| D13 | **M7** 域名维度控制 | DNS 层Hook 或旁路 DNS 服务器 | W3 | ⏳ |
+| D14-15 | **M8** 用户态文件隔离 | Broker 代理受限文件访问 + NTFS ACL 收敛 | W2 | ⏳ |
+| D16-18 | **M9** 内核 Minifilter | `sandbox_flt.sys` PreCreate 按PID + 路径拦截 | W2 | ⏳ |
+| D19 | **M10** 越狱测试套件 | 8~10 个 attacker exe 验证每层防御 | 全部 | ⏳ |
+| D20 | **M11** 交付打包 | 架构图 + JD 关键词映射 + 5 分钟话术 | 全部 | ⏳ |
+
+**JD 能力块编号**：
+- W1 = 进程管控（Job / Token / IL / AppContainer / PP-PPL / Mitigation）
+- W2 = 文件系统隔离（NTFS ACL / Minifilter / 对象命名空间 / 句柄 ACL）
+- W3 = 网络访问控制（WFP / LSP / NSP / NDIS / TDI，进程/协议/IP/端口/域名维度）
+- W4 = 注入与反注入 / Hook（远程线程、APC、IAT / Inline / MinHook）
+- W5 = Windows NT 底层原理（PE / 对象管理 / 异常分发 / ALPC / COM）
+
+---
+
+## 4. 目录结构（当前 M0）
+
+```
+sandbox_demo/
+├─ CMakeLists.txt           顶层 CMake：分层子目标 + MSVC 硬化选项
+├─ build.bat / run.bat      一键脚本
+├─ src/
+│  ├─ common/               无状态工具，所有模块共用
+│  │  ├─ scoped_handle.h    RAII HANDLE 五法则封装
+│  │  ├─ win_error.h        GetLastError → std::error_code
+│  │  └─ logger.h           线程安全宽字符 stdout logger
+│  ├─ core/                 沙箱能力砖块
+│  │  ├─ job_manager.{h,cc}       Job Object（W1）
+│  │  ├─ token_manager.{h,cc}     Restricted Token（W1）
+│  │  └─ process_launcher.{h,cc}  串接Job+Token+CREATE_SUSPENDED
+│  └─ demo/
+│     └─ m0_demo.cc         M0 冒烟主程序
+├─ tests/                   越狱测试用例（M10）
+└─ docs/
+   └─ notes/                每个 milestone 的学习笔记（面试口径）
+      └─ M0.md
+```
+
+后续 milestone 会往下面这些**已经预留好的位置**填代码，架构不再大改：
+```
+src/
+├─ ipc/            (M3) Named-Pipe 传输 + 协议帧 + 分发器
+├─ broker/         (M3+M8) Broker 主程序、Policy Engine、File Broker
+├─ target/         (M3) Target 子程序
+├─ hook/           (M4/5) injector / hook_payload / anti_inject
+├─ network/        (M6/7) WFP 引擎 + DNS Guard
+└─ minifilter/     (M9)内核 sys 独立项目
+```
+
+---
+
+## 5. 编译与运行
+
+### 环境要求
+- **OS**：Windows 10 1709+ / Windows 11（后续 milestone 用到的 Mitigation Policy 需要）
+- **VS**：Visual Studio 2022（含 C++桌面负载）
+- **SDK**：Windows 10 SDK 26100 或 22621（`_WIN32_WINNT=0x0A00` 生效）
+- **CMake**：3.20+
+- **WDK**（可选，M9 内核 Minifilter 用）：与 SDK 主版本一致的 WDK for 24H2
+
+### 编译
+
+```bat
+::一键编译（生成到 build_m0/ 目录）
+build.bat
+```
+
+或手动：
+```bat
+cmake -S . -B build_m0 -A x64
+cmake --build build_m0 --config Debug
+```
+
+### 运行 M0
+
+```bat
+:: 用 M0 sandbox 拉起 notepad
+run.bat
+
+:: 或指定其他 exe
+run.bat "C:\Windows\System32\calc.exe"
+```
+
+预期输出：
+```
+[+] JobManager: job created. process_limit=4 mem_limit_mb=256 cpu_rate=20%
+[+] TokenManager: restricted token created (all privileges removed)
+[+] ProcessLauncher: pid=xxxxx tid=xxxxx image=C:\Windows\System32\notepad.exe
+[+] Active processes in job: 2
+[+]   in-job PID = xxxxx
+[+] Target exited with code=0
+```
+
+---
+
+## 6. 各Milestone 说明
+
+### ✅ M0 — 基础闭环 Job + Token + CREATE_SUSPENDED
+
+**能干什么**：把一个 exe 关进 Job Object（限 4 进程 / 每进程 256 MB / CPU 硬上限 20% / UI 全锁），用一个"所有 privilege 都 disable"的 restricted token 启动它，并保证限制在目标进程执行第一行指令之前就已经生效。
+
+**关键 API**：`CreateJobObjectW` / `SetInformationJobObject` × 3 info-class / `AssignProcessToJobObject` / `OpenProcessToken` / `CreateRestrictedToken` / `CreateProcessAsUserW` + `CREATE_SUSPENDED` / `ResumeThread`。
+
+**修的3 个硬伤**：
+1.去掉 `JOB_OBJECT_LIMIT_BREAKAWAY_OK`（这个 flag 是**允许**target 逃出 job，语义完全反了），改为 `KILL_ON_JOB_CLOSE` + `DIE_ON_UNHANDLED_EXCEPTION`
+2. 两次 `SetInformationJobObject(ExtendedLimit)` 覆盖问题合并成一次
+3. `CreateProcess` 加 `CREATE_SUSPENDED` → assign to job → resume（原代码是先跑后 assign，有时间窗漏洞）
+
+**面试锚点**：见 [`docs/notes/M0.md`](sandbox_demo/docs/notes/M0.md)。
+
+### ⏳ M1 — 进程加固：Integrity Level + Mitigation Policy + Alternate Desktop
+
+即将开工。计划：
+- `TokenManager::SetIntegrityLevel(Low)` —完整性等级降到 Low，隔离普通桌面文件访问
+- `STARTUPINFOEX` + `UpdateProcThreadAttribute(PROC_THREAD_ATTRIBUTE_MITIGATION_POLICY)` 一次装 8 项策略：`BLOCK_NON_MICROSOFT_BINARIES` / `PROHIBIT_DYNAMIC_CODE` / `CHILD_PROCESS_RESTRICTED` / ASLR force-relocate / ...
+- `CreateWindowStation` + `CreateDesktop`，把 target塞进独立 winsta+desktop，防截屏、防 UI 提权
+
+### ⏳ M2 及以后 — 见 Roadmap 表
+
+---
+
+## 7. 参考 & 对齐目标
+
+- **Chromium sandbox**（[design doc](https://chromium.googlesource.com/chromium/src/+/HEAD/docs/design/sandbox.md)）— 工业级Broker/Target 双进程沙箱的黄金标准
+- **Windows Job Object docs** — https://learn.microsoft.com/windows/win32/procthread/job-objects
+- **Mitigation Policy** — `PROCESS_MITIGATION_POLICY` 官方文档
+- **WFP** — Windows Filtering Platform 网络过滤框架
+- **Minifilter** — 文件系统过滤驱动模型
+
+本工程的最终形态**不追求覆盖 Chromium sandbox 全部特性**，目标是"覆盖 JD 5 大能力块 + 每个能力块有一个可讲的原型"，作为**面试作品集**使用。
+
+---
+
+## 8. License
+
+MIT
