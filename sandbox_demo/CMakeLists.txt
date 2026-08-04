@@ -1,22 +1,63 @@
-cmake_minimum_required(VERSION 3.16)
+# =============================================================================
+# sandbox_demo — Windows Agent Sandbox learning project
+#
+# Target milestones (see docs/notes/*):
+#   M0   Job + Token + CREATE_SUSPENDED baseline           (current)
+#   M1Integrity Level + STARTUPINFOEX Mitigation Policy
+#   M2   AppContainer / LowBox Token
+#   M3   Broker/Target split + Named-Pipe IPC
+#   M4/5 Injector / Hook payload / anti-inject
+#   M6/7 WFP network firewall / DNS domain guard
+#   M8   User-mode file broker
+#   M9   Kernel-mode Minifilter driver
+# =============================================================================
+cmake_minimum_required(VERSION 3.20)
 project(sandbox_demo LANGUAGES CXX)
 
+# ----- Global C++ settings ----------------------------------------------------
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
 
-# Windows 下关闭编译器警告（可选）
+# All targets can #include from src/  (i.e. #include "common/scoped_handle.h")
+include_directories(${CMAKE_SOURCE_DIR}/src)
+
+# ----- MSVC hardening flags ---------------------------------------------------
 if(MSVC)
-    add_compile_options(/W4 /permissive- /utf-8)
+    add_compile_options(
+        /W4              # tight warnings
+        /permissive-     # standards conformance
+        /utf-8           # source & exec charset = UTF-8 (fixes the GBK bug)
+        /Zc:__cplusplus  # report the real __cplusplus value
+        /EHsc            # exception model (we don't throw, but STL needs this)
+    )
+    add_compile_definitions(
+        _CRT_SECURE_NO_WARNINGS
+        UNICODE _UNICODE
+        WIN32_LEAN_AND_MEAN
+        NOMINMAX
+        _WIN32_WINNT=0x0A00   # target Win10+ (needed for later Mitigation APIs)
+    )
 endif()
 
-add_executable(sandbox_demo
-    src/main.cpp
-    src/sandbox.cpp
-    src/sandbox.h
+# ----- Shared static library: common + core ----------------------------------
+add_library(sandbox_core STATIC
+    src/core/job_manager.cc
+    src/core/token_manager.cc
+    src/core/process_launcher.cc
 )
-
-target_link_libraries(sandbox_demo PRIVATE
+target_include_directories(sandbox_core PUBLIC src)
+target_link_libraries(sandbox_core PUBLIC
     kernel32.lib
     user32.lib
     advapi32.lib
+    userenv.lib
 )
+
+# ----- M0 demo executable -----------------------------------------------------
+add_executable(m0_demo src/demo/m0_demo.cc)
+target_link_libraries(m0_demo PRIVATE sandbox_core)
+
+# ----- Group projects in Visual Studio Solution Explorer ---------------------
+set_target_properties(sandbox_core PROPERTIES FOLDER "core")
+set_target_properties(m0_demo      PROPERTIES FOLDER "demo")
