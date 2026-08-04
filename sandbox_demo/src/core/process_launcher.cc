@@ -103,9 +103,21 @@ std::error_code ProcessLauncher::WaitForExit(HANDLE process,
                                              std::chrono::milliseconds timeout,
                                              DWORD& exit_code) {
     exit_code = 0;
-    const DWORD ms = timeout.count() > 0xFFFFFFFELL
-                         ? INFINITE
-                         : static_cast<DWORD>(timeout.count());
+
+    // Sentinel: zero timeout means "wait forever". Convenience for callers
+    // that don't want a deadline (e.g. broker running a long-lived target).
+    DWORD ms;
+    if (timeout == std::chrono::milliseconds::zero()) {
+        ms = INFINITE;
+    } else if (timeout.count() >= INFINITE) {
+        // WaitForSingleObject uses 0xFFFFFFFF (INFINITE) as a sentinel, so any
+        // legitimate finite timeout must be strictly less. Clamp to the max
+        // finite value (INFINITE - 1).
+        ms = INFINITE - 1;
+    } else {
+        ms = static_cast<DWORD>(timeout.count());
+    }
+
     DWORD r = ::WaitForSingleObject(process, ms);
     if (r == WAIT_OBJECT_0) {
         if (!::GetExitCodeProcess(process, &exit_code)) return LastError();

@@ -58,6 +58,15 @@ target_link_libraries(sandbox_core PUBLIC
 add_executable(m0_demo src/demo/m0_demo.cc)
 target_link_libraries(m0_demo PRIVATE sandbox_core)
 
+# ----- A trivial target used as sandbox smoke-test payload --------------------
+# Launch it directly to see the "baseline" (Medium IL, no job, all privileges).
+# Launch it via m0_demo to see the "sandboxed" behavior (Job + restricted token).
+# In later milestones (M1: Low IL, M2: AppContainer) the integrity_level line
+# it prints will change accordingly — a nice built-in verification signal.
+add_executable(hello_target src/demo/hello_target.cc)
+target_link_libraries(hello_target PRIVATE advapi32.lib)
+
 # ----- Group projects in Visual Studio Solution Explorer ---------------------
-set_target_properties(sandbox_core PROPERTIES FOLDER "core")
-set_target_properties(m0_demo      PROPERTIES FOLDER "demo")
+set_target_properties(sandbox_core  PROPERTIES FOLDER "core")
+set_target_properties(m0_demo       PROPERTIES FOLDER "demo")
+set_target_properties(hello_target  PROPERTIES FOLDER "demo")

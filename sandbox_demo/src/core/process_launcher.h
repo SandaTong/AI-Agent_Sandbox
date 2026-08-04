@@ -56,6 +56,9 @@ class ProcessLauncher {
     std::error_code Launch(const LaunchOptions& opts, LaunchResult& out);
 
     // Convenience: block until the given process exits or timeout elapses.
+    // Special value: timeout == std::chrono::milliseconds::zero() means
+    // "wait forever" (INFINITE). Otherwise the millisecond count is clamped
+    // to the DWORD range accepted by WaitForSingleObject.
     // Returns:
     //   error_code{}      — process exited within timeout.
     //   WAIT_TIMEOUT      — did not exit in time.

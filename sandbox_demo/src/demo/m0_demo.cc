@@ -97,9 +97,16 @@ int wmain(int argc, wchar_t** argv) {
     }
 
     // ---------- Wait ----------
+    // We wait indefinitely for the target to exit (user closes it).
+    // While m0_demo is alive, the Job kernel handle stays alive, so the
+    // Job (and everything in it) also stays alive. When m0_demo finally
+    // returns, JobManager's destructor closes the last Job handle, and
+    // KILL_ON_JOB_CLOSE terminates every remaining process in the job.
+    // That's the intended sandbox lifecycle: target dies with broker.
+    LOG_INFO << L"Waiting for target to exit... (close it manually to end)";
     DWORD exit_code = 0;
     auto ec = ProcessLauncher::WaitForExit(res.process.get(),
-                                           std::chrono::seconds(30),
+                                           std::chrono::milliseconds::zero(),
                                            exit_code);
     if (ec) {
         LOG_WARN << L"WaitForExit returned: " << DescribeError(ec).c_str();
