@@ -9,85 +9,78 @@
 namespace sandbox {
 
 std::error_code JobManager::Create(const JobPolicy& policy) {
-    // 1) CreateJobObjectW: kernel object that groups processes.
-    //    Second arg NULL => unnamed job (only referenceable by handle).
+    // 1) CreateJobObjectW：创建 Job 内核对象。第二个参数传 NULL 表示无名
+    //    Job（只能通过 handle 引用，不能通过对象名 OpenJobObject 打开）。
     ScopedHandle job(::CreateJobObjectW(nullptr, nullptr));
     if (!job) {
         return LastError();
     }
 
-    // 2) Merge ALL flags for JobObjectExtendedLimitInformation into one struct
-    //    and call SetInformationJobObject ONCE. Two prior calls with zero-init
-    //    structs each was a bug (later call wiped earlier LimitFlags).
+    // 2) JobObjectExtendedLimitInformation 这个 info-class 是"整块覆盖"语义，
+    //    所以我们把所有相关 flag / limit 合成一个结构体一次性写下去。
+    //    早期版本分两次调用会导致第二次的零值结构体覆盖第一次的设置。
     JOBOBJECT_EXTENDED_LIMIT_INFORMATION eli{};
     DWORD flags = 0;
 
-    // Hard kill: when the last handle to the job closes (e.g. broker crashes),
-    // every process still in the job is terminated. This is the safety net
-    // against orphaned sandboxed processes.
+    // 硬 kill：Job 的最后一个 handle 被关闭时（比如 broker 崩溃），
+    // Job 里所有还活着的进程都会被内核终结。这是防止"沙箱失控 target
+    // 变成孤儿进程"的兜底保护。
     flags |= JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
 
-    // If a process in the job takes an unhandled exception, terminate it
-    // silently instead of showing the WER dialog.
+    // Job 内进程发生未处理异常时静默终结，不弹 WER 对话框。
     flags |= JOB_OBJECT_LIMIT_DIE_ON_UNHANDLED_EXCEPTION;
 
-    // Cap number of live processes.
+    // 活跃进程数上限。
     if (policy.active_process_limit > 0) {
         flags |= JOB_OBJECT_LIMIT_ACTIVE_PROCESS;
         eli.BasicLimitInformation.ActiveProcessLimit = policy.active_process_limit;
     }
 
-    // Cap per-process working set / commit.
+    // 单进程 working set / commit 上限。
     if (policy.process_memory_limit > 0) {
         flags |= JOB_OBJECT_LIMIT_PROCESS_MEMORY;
         eli.ProcessMemoryLimit = policy.process_memory_limit;
     }
 
-    // NOTE: we deliberately do NOT set JOB_OBJECT_LIMIT_BREAKAWAY_OK or
-    // JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK. Setting either would let a child
-    // process escape the job via CREATE_BREAKAWAY_FROM_JOB. Absence of the
-    // flag => any child process launched by anyone inside the job is
-    // automatically part of the job too.
+    // 注意：这里刻意不设 JOB_OBJECT_LIMIT_BREAKAWAY_OK 或 SILENT_BREAKAWAY_OK。
+    // 一旦设了，子进程就可以通过 CREATE_BREAKAWAY_FROM_JOB 逃出 Job。
+    // 不设这两个 flag 意味着：Job 内任何进程 CreateProcess 出来的子进程
+    // 自动继承 Job，谁也逃不掉。
 
     eli.BasicLimitInformation.LimitFlags = flags;
 
-    if (!::SetInformationJobObject(job.get(),
-                                   JobObjectExtendedLimitInformation,
-                                   &eli, sizeof(eli))) {
+    if (!::SetInformationJobObject(job.get(), JobObjectExtendedLimitInformation, &eli,
+                                   sizeof(eli))) {
         return LastError();
     }
 
-    // 3) CPU rate hard cap (JobObjectCpuRateControlInformation).
-    //    HARD_CAP means the scheduler will actually withhold CPU once the
-    //    quota is exceeded — not just weight down the priority.
+    // 3) CPU 硬上限（JobObjectCpuRateControlInformation）。
+    //    HARD_CAP 表示"超额直接扣时间片"，而不是只降优先级，是真正的硬顶。
     if (policy.cpu_rate_1_10000 > 0) {
         JOBOBJECT_CPU_RATE_CONTROL_INFORMATION cri{};
-        cri.ControlFlags = JOB_OBJECT_CPU_RATE_CONTROL_ENABLE |
-                           JOB_OBJECT_CPU_RATE_CONTROL_HARD_CAP;
+        cri.ControlFlags =
+            JOB_OBJECT_CPU_RATE_CONTROL_ENABLE | JOB_OBJECT_CPU_RATE_CONTROL_HARD_CAP;
         cri.CpuRate = policy.cpu_rate_1_10000;
-        if (!::SetInformationJobObject(job.get(),
-                                       JobObjectCpuRateControlInformation,
-                                       &cri, sizeof(cri))) {
+        if (!::SetInformationJobObject(job.get(), JobObjectCpuRateControlInformation, &cri,
+                                       sizeof(cri))) {
             return LastError();
         }
     }
 
-    // 4) UI restrictions.
+    // 4) UI 限制。
     if (policy.ui_restrictions != 0) {
         JOBOBJECT_BASIC_UI_RESTRICTIONS uir{};
         uir.UIRestrictionsClass = policy.ui_restrictions;
-        if (!::SetInformationJobObject(job.get(),
-                                       JobObjectBasicUIRestrictions,
-                                       &uir, sizeof(uir))) {
+        if (!::SetInformationJobObject(job.get(), JobObjectBasicUIRestrictions, &uir,
+                                       sizeof(uir))) {
             return LastError();
         }
     }
 
     job_ = std::move(job);
-    LOG_INFO << L"JobManager: job created. process_limit="
-             << policy.active_process_limit
-             << L" mem_limit_mb=" << (policy.process_memory_limit >> 20)
-             << L" cpu_rate=" << (policy.cpu_rate_1_10000 / 100.0) << L"%";
+    LOG_INFO << L"JobManager: job created. process_limit=" << policy.active_process_limit
+             << L" mem_limit_mb=" << (policy.process_memory_limit >> 20) << L" cpu_rate="
+             << (policy.cpu_rate_1_10000 / 100.0) << L"%";
     return {};
 }
 
@@ -103,12 +96,12 @@ std::error_code JobManager::Assign(HANDLE process_handle) {
 
 std::error_code JobManager::GetActiveProcessCount(DWORD& out) const {
     out = 0;
-    if (!valid()) return MakeWinError(ERROR_INVALID_STATE);
+    if (!valid())
+        return MakeWinError(ERROR_INVALID_STATE);
 
     JOBOBJECT_BASIC_ACCOUNTING_INFORMATION acc{};
-    if (!::QueryInformationJobObject(job_.get(),
-                                     JobObjectBasicAccountingInformation,
-                                     &acc, sizeof(acc), nullptr)) {
+    if (!::QueryInformationJobObject(job_.get(), JobObjectBasicAccountingInformation, &acc,
+                                     sizeof(acc), nullptr)) {
         return LastError();
     }
     out = acc.ActiveProcesses;
@@ -116,22 +109,20 @@ std::error_code JobManager::GetActiveProcessCount(DWORD& out) const {
 }
 
 std::vector<DWORD> JobManager::EnumerateProcessIds() const {
-    if (!valid()) return {};
+    if (!valid())
+        return {};
 
-    // Two-phase query pattern:
-    //   1) Call with a moderately sized buffer.
-    //   2) If ERROR_MORE_DATA, the API writes the *required* size into
-    //      returned_bytes; resize and retry.
-    std::vector<BYTE> buf(sizeof(JOBOBJECT_BASIC_PROCESS_ID_LIST) +
-                          sizeof(ULONG_PTR) * 64);
+    // Win32 常见的"两阶段 query"模式：
+    //   1) 先用一个大致够用的 buffer 调用；
+    //   2) 如果返回 ERROR_MORE_DATA，API 会把实际需要的字节数写进 returned，
+    //    按这个大小 resize 后重试一次。
+    std::vector<BYTE> buf(sizeof(JOBOBJECT_BASIC_PROCESS_ID_LIST) + sizeof(ULONG_PTR) * 64);
     DWORD returned = 0;
 
     for (int attempt = 0; attempt < 2; ++attempt) {
         auto* list = reinterpret_cast<JOBOBJECT_BASIC_PROCESS_ID_LIST*>(buf.data());
-        if (::QueryInformationJobObject(job_.get(),
-                                        JobObjectBasicProcessIdList,
-                                        list, static_cast<DWORD>(buf.size()),
-                                        &returned)) {
+        if (::QueryInformationJobObject(job_.get(), JobObjectBasicProcessIdList, list,
+                                        static_cast<DWORD>(buf.size()), &returned)) {
             std::vector<DWORD> pids;
             pids.reserve(list->NumberOfProcessIdsInList);
             for (DWORD i = 0; i < list->NumberOfProcessIdsInList; ++i) {
@@ -141,8 +132,7 @@ std::vector<DWORD> JobManager::EnumerateProcessIds() const {
         }
 
         const DWORD err = ::GetLastError();
-        // "MORE_DATA" is signalled here as ERROR_MORE_DATA, and `returned` is
-        // the number of bytes actually required. Resize and retry once.
+        // ERROR_MORE_DATA 表示 buffer 不够，returned 是实际需要的字节数。
         if (err == ERROR_MORE_DATA && returned > buf.size()) {
             buf.resize(returned);
             continue;

@@ -1,0 +1,28 @@
+# =============================================================================
+# .clang-format — sandbox_demo 代码风格
+#
+# 基础：Google 风格（industry 主流，Chromium sandbox 也用它）
+# 微调：
+#   * 4 空格缩进（Google 默认 2，我们改成 4，视觉更宽松）
+#   * 列宽 100（Google 默认 80，Windows 长 API 名太多，放宽一些）
+#
+# 使用：
+#   clang-format -i  <files>          就地格式化
+#   git clang-format     只格式化 diff 部分
+# =============================================================================
+BasedOnStyle: Google
+IndentWidth: 4
+ColumnLimit: 100
+AccessModifierOffset: -3
+AlignAfterOpenBracket: Align
+AlignConsecutiveAssignments: false
+AlignConsecutiveDeclarations: false
+AllowShortFunctionsOnASingleLine: Inline
+AllowShortIfStatementsOnASingleLine: false
+BreakBeforeBraces: Attach
+Cpp11BracedListStyle: true
+DerivePointerAlignment: false
+PointerAlignment: Left
+SortIncludes: false
+SpaceBeforeAssignmentOperators: true
+Standard: c++17

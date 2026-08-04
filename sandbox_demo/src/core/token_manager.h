@@ -1,23 +1,21 @@
 // -----------------------------------------------------------------------------
 // core/token_manager.h
 // -----------------------------------------------------------------------------
-// Builds a restricted primary token that will be used to spawn the target.
+// 构造一个受限的 primary token，用于启动 target 进程。
 //
-// JD mapping (Windows W1 - 权限收敛):
-//   "熟悉Windows权限与安全边界机制，包括 Access Token、Integrity Level ...
+// 对应 JD Windows 方向 W1（权限收敛）:
+//   "熟悉 Windows 权限与安全边界机制，包括 Access Token、Integrity Level ...
 //    具备权限收敛、进程约束与沙箱加固实践经验"
 //
-// This M0 version does the *basic* layer: CreateRestrictedToken with
-// DISABLE_MAX_PRIVILEGE. In M1 we'll additionally lower Integrity Level to
-// Low/Untrusted, and in M2 we'll produce an AppContainer/LowBox token via
-// NtCreateLowBoxToken.
+// M0 版本只做最基础一层：CreateRestrictedToken + DISABLE_MAX_PRIVILEGE。
+// M1 会额外把 Integrity Level 降到 Low / Untrusted；
+// M2 会用 NtCreateLowBoxToken 生成 AppContainer 的 LowBox Token。
 //
-// What we deliberately DID improve vs the old code:
-//   - No longer requests TOKEN_ALL_ACCESS when opening the parent token. We
-//     only need TOKEN_DUPLICATE | TOKEN_QUERY | TOKEN_ASSIGN_PRIMARY |
-//     TOKEN_ADJUST_DEFAULT | TOKEN_ADJUST_SESSIONID. Principle of least
-//     privilege applies to us too.
-//   - Wrapped in ScopedHandle so leaks are impossible.
+// 相比初版的改进：
+//   - 打开父进程 token 时不再要求 TOKEN_ALL_ACCESS。我们只需要
+//     TOKEN_DUPLICATE | TOKEN_QUERY | TOKEN_ASSIGN_PRIMARY |
+//     TOKEN_ADJUST_DEFAULT。最小权限原则对 broker 自己也适用。
+//   - 全程用 ScopedHandle 包裹，杜绝 HANDLE 泄漏。
 // -----------------------------------------------------------------------------
 #pragma once
 
@@ -38,13 +36,12 @@ class TokenManager {
     TokenManager(TokenManager&&) = default;
     TokenManager& operator=(TokenManager&&) = default;
 
-    // Build a restricted token from the current process token.
-    // Steps:
-    //   1) OpenProcessToken (least privileges we need)
-    //   2) CreateRestrictedToken with DISABLE_MAX_PRIVILEGE
-    //      => every privilege on the source token is turned into
-    //         SE_PRIVILEGE_REMOVED (SeDebugPrivilege, SeTcbPrivilege, etc.)
-    //   3) The result is a *primary* token suitable for CreateProcessAsUserW.
+    // 从当前进程 token 派生一个 restricted token：
+    //   1) OpenProcessToken（只取必要权限）
+    //   2) CreateRestrictedToken 传 DISABLE_MAX_PRIVILEGE，让源 token 里的
+    //      每一项 privilege 都被标记为 SE_PRIVILEGE_REMOVED（比如
+    //      SeDebugPrivilege、SeTcbPrivilege 等永久无法再激活）
+    //   3) 得到一个 primary token，供后续 CreateProcessAsUserW 使用
     std::error_code CreateRestricted();
 
     [[nodiscard]] HANDLE handle() const noexcept { return token_.get(); }

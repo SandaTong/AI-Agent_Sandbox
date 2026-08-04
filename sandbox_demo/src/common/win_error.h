@@ -1,16 +1,15 @@
 // -----------------------------------------------------------------------------
 // common/win_error.h
 // -----------------------------------------------------------------------------
-// Convenience helpers to turn Win32 GetLastError() into std::error_code and to
-// format Win32 error codes into human-readable strings.
+// 把 Win32 的 GetLastError() 包装成 std::error_code，以及格式化错误码。
 //
-// Why:
-//   - std::error_code is the standard C++17 way to pass errors without
-//     exceptions (which we forbid across the module boundary).
-//   - std::system_category() knows how to FormatMessage() a Win32 code, so
-//     ec.message() gives you the OS-localized message for free.
+// 为什么这么做：
+// - std::error_code 是 C++17 标准里"不用异常传错误"的规范做法（本工程
+//     跨模块边界一律不抛异常）。
+//   - std::system_category() 内部会调用 FormatMessage() 翻译 Win32 错误码，
+//     所以 ec.message() 直接就有本地化的可读文案，不用自己拼字符串。
 //
-// Usage:
+// 常见用法：
 //   if (!SomeApi(...)) {
 //       return LastError();   // -> std::error_code{GLE, system_category}
 //   }
@@ -24,17 +23,17 @@
 
 namespace sandbox {
 
-// Snapshot GetLastError() as a std::error_code (system_category).
+// 把当前的 GetLastError() 快照成 std::error_code（system_category 分类）。
 [[nodiscard]] inline std::error_code LastError() noexcept {
     return {static_cast<int>(::GetLastError()), std::system_category()};
 }
 
-// Explicit code -> error_code.
+// 显式指定错误码 -> error_code。
 [[nodiscard]] inline std::error_code MakeWinError(DWORD code) noexcept {
     return {static_cast<int>(code), std::system_category()};
 }
 
-// Formatted display: "[123] The device is not ready."
+// 格式化为可读字符串："[123] The device is not ready."
 [[nodiscard]] inline std::string DescribeError(const std::error_code& ec) {
     return "[" + std::to_string(ec.value()) + "] " + ec.message();
 }

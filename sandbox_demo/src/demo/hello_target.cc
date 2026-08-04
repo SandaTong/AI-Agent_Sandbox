@@ -1,16 +1,15 @@
 // -----------------------------------------------------------------------------
 // demo/hello_target.cc
 // -----------------------------------------------------------------------------
-// A trivial target program used to smoke-test the sandbox.
+// 一个极简的"被沙箱化"目标程序，用于冒烟对比。
 //
-// It:
-//   - Prints its PID, image path, and integrity level (approximate).
-//   - Enters a message loop with a heartbeat every 2 seconds.
-//   - Exits cleanly on Ctrl+C or when its window is closed.
+// 它做的事：
+//   - 打印自身 PID、映像路径、完整性等级（Integrity Level 近似值）
+//   - 进入心跳循环，每 2 秒打印一个 tick
+//   - Ctrl+C 或关闭窗口时干净退出
 //
-// We deliberately keep it self-contained (no dependency on sandbox_core) so
-// it can be launched either directly (baseline behavior) or via m0_demo
-// (sandboxed behavior). The output difference is the whole point.
+// 特意做成自包含（不依赖 sandbox_core），既可以直接双击运行（基线组），
+// 也可以通过 m0_demo 拉起（沙箱组）。输出差异就是沙箱效果的直观证据。
 // -----------------------------------------------------------------------------
 #include <windows.h>
 
@@ -20,8 +19,8 @@
 
 namespace {
 
-// Query own integrity level as a human string. Returns empty on failure.
-// Docs: https://learn.microsoft.com/windows/win32/secauthz/mandatory-integrity-control
+// 查询自身进程的 Integrity Level，返回一个人类可读字符串。失败返回 "?"
+// 参考: https://learn.microsoft.com/windows/win32/secauthz/mandatory-integrity-control
 const wchar_t* GetOwnIntegrityLevel() {
     HANDLE token = nullptr;
     if (!::OpenProcessToken(::GetCurrentProcess(), TOKEN_QUERY, &token)) {
@@ -43,15 +42,20 @@ const wchar_t* GetOwnIntegrityLevel() {
 
     const wchar_t* result = L"?";
     if (::GetTokenInformation(token, TokenIntegrityLevel, buf, size, &size)) {
-        // RID at the *last* sub-authority of the label SID identifies the IL.
+        // Integrity Level 编码在 SID 最后一个 sub-authority 里。取出对应
+        // RID 后按 SECURITY_MANDATORY_*_RID 的范围划一下就能得到等级。
         DWORD rid = *::GetSidSubAuthority(
-            buf->Label.Sid,
-            static_cast<DWORD>(*::GetSidSubAuthorityCount(buf->Label.Sid) - 1));
-        if (rid < 0x1000)result = L"Untrusted";
-        else if (rid < 0x2000)  result = L"Low";
-        else if (rid < 0x3000)  result = L"Medium";
-        else if (rid < 0x4000)  result = L"High";
-        else                    result = L"System";
+            buf->Label.Sid, static_cast<DWORD>(*::GetSidSubAuthorityCount(buf->Label.Sid) - 1));
+        if (rid < 0x1000)
+            result = L"Untrusted";
+        else if (rid < 0x2000)
+            result = L"Low";
+        else if (rid < 0x3000)
+            result = L"Medium";
+        else if (rid < 0x4000)
+            result = L"High";
+        else
+            result = L"System";
     }
     std::free(buf);
     ::CloseHandle(token);
@@ -59,9 +63,8 @@ const wchar_t* GetOwnIntegrityLevel() {
 }
 
 BOOL WINAPI CtrlHandler(DWORD type) {
-    if (type == CTRL_C_EVENT || type == CTRL_BREAK_EVENT ||
-        type == CTRL_CLOSE_EVENT) {
-        std::wprintf(L"[target] caught ctrl signal, exiting\n");
+    if (type == CTRL_C_EVENT || type == CTRL_BREAK_EVENT || type == CTRL_CLOSE_EVENT) {
+        std::wprintf(L"[target] 收到 Ctrl 信号，退出\n");
         std::exit(0);
     }
     return FALSE;
@@ -79,8 +82,7 @@ int wmain() {
     std::wprintf(L"[target] pid=%lu\n", ::GetCurrentProcessId());
     std::wprintf(L"[target] image=%ls\n", exe_path);
     std::wprintf(L"[target] integrity_level=%ls\n", GetOwnIntegrityLevel());
-    std::wprintf(L"[target] I will heartbeat every 2s. Press Ctrl+C or close"
-                 L" this window to exit.\n");
+    std::wprintf(L"[target] 每 2 秒发一次心跳。按 Ctrl+C 或关闭窗口即可退出。\n");
     std::fflush(stdout);
 
     int i = 0;
@@ -89,5 +91,5 @@ int wmain() {
         std::wprintf(L"[target] tick %d\n", ++i);
         std::fflush(stdout);
     }
-    // Unreachable — infinite loop above only exits via CtrlHandler -> exit(0).
+    // 上面是死循环，只能通过 CtrlHandler -> exit(0) 退出，这里不可达。
 }

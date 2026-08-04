@@ -1,25 +1,25 @@
 // -----------------------------------------------------------------------------
 // core/job_manager.h
 // -----------------------------------------------------------------------------
-// Wraps a Windows Job Object and applies resource / UI / process constraints.
+// 封装 Windows Job Object，负责施加资源 / UI / 进程约束。
 //
-// JD mapping (Windows W1 - 进程管控& 资源限制):
-//   "熟悉Windows权限与安全边界机制，包括 ... Job Object ... 具备权限收敛、
-//    进程约束与沙箱加固实践经验"
+// 对应 JD Windows 方向 W1（进程管控 & 资源限制）:
+//   "熟悉 Windows 权限与安全边界机制，包括 ... Job Object ...
+//    具备权限收敛、进程约束与沙箱加固实践经验"
 //
-// Layers of protection expressed here (bottom -> top):
-//   1. Process cap (JOB_OBJECT_LIMIT_ACTIVE_PROCESS)
-//   2. Memory cap per-process (JOB_OBJECT_LIMIT_PROCESS_MEMORY)
-//   3. CPU hard cap (JobObjectCpuRateControlInformation, HARD_CAP)
-//   4. UI lockdown (clipboard/desktop/exitwindows/globalatoms/handles)
-//   5. Kill-on-close: when Broker dies, all targets die with it (safety net)
+// 本类当前施加的多层护栏（自下而上）：
+//   1. 进程数上限（JOB_OBJECT_LIMIT_ACTIVE_PROCESS）
+//   2. 单进程内存上限（JOB_OBJECT_LIMIT_PROCESS_MEMORY）
+//   3. CPU 硬上限（JobObjectCpuRateControlInformation + HARD_CAP）
+//   4. UI 全锁（剪贴板/桌面/退出/全局 atom/USER 句柄……）
+// 5. Kill-on-close：Broker 死 -> Job 里所有 target 一起死（安全保底）
 //
-// Fixed bugs (compared to old sandbox.cpp):
-//   - Removed JOB_OBJECT_LIMIT_BREAKAWAY_OK (which *allowed* jailbreak).
-//     Now we ADD JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE and
-//     JOB_OBJECT_LIMIT_DIE_ON_UNHANDLED_EXCEPTION.
-//   - Merged two SetInformationJobObject(ExtendedLimit) calls into one, so the
-//     second no longer overwrites the first's LimitFlags / ActiveProcessLimit.
+// 相比初版 sandbox.cpp 修复的坑：
+//   - 去掉 JOB_OBJECT_LIMIT_BREAKAWAY_OK（那个 flag 是"允许 target 逃出 job"，
+// 语义正好相反）。改成加 JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE 和
+//     JOB_OBJECT_LIMIT_DIE_ON_UNHANDLED_EXCEPTION。
+//   - 两次 SetInformationJobObject(ExtendedLimit) 合并成一次调用，避免
+//     后一次全零结构体覆盖掉前一次的 LimitFlags / ActiveProcessLimit。
 // -----------------------------------------------------------------------------
 #pragma once
 
@@ -34,24 +34,20 @@
 namespace sandbox {
 
 struct JobPolicy {
-    // Hard cap on the number of processes that may live inside the job.
+    // Job 内允许同时存活的进程数上限。
     DWORD active_process_limit = 4;
 
-    // Per-process memory cap in bytes. 0 = no limit.
-    SIZE_T process_memory_limit = 256ull * 1024 * 1024;   // 256 MB
+    // 单进程内存上限（字节）。0 = 不限制。
+    SIZE_T process_memory_limit = 256ull * 1024 * 1024;  // 256 MB
 
-    // CPU cap as a fraction of 10000 (i.e. 2000 = 20% of one CPU). 0 = no cap.
+    // CPU 上限，以万分之一为单位（2000 = 单核 20%）。0 = 不限制。
     DWORD cpu_rate_1_10000 = 2000;
 
-    // UI restrictions bitmask (JOB_OBJECT_UILIMIT_*).
-    DWORD ui_restrictions = JOB_OBJECT_UILIMIT_DESKTOP |
-                            JOB_OBJECT_UILIMIT_DISPLAYSETTINGS |
-                            JOB_OBJECT_UILIMIT_EXITWINDOWS |
-                            JOB_OBJECT_UILIMIT_GLOBALATOMS |
-                            JOB_OBJECT_UILIMIT_HANDLES |
-                            JOB_OBJECT_UILIMIT_READCLIPBOARD |
-                            JOB_OBJECT_UILIMIT_WRITECLIPBOARD |
-                            JOB_OBJECT_UILIMIT_SYSTEMPARAMETERS;
+    // UI 限制位图（JOB_OBJECT_UILIMIT_*）。
+    DWORD ui_restrictions = JOB_OBJECT_UILIMIT_DESKTOP | JOB_OBJECT_UILIMIT_DISPLAYSETTINGS |
+                            JOB_OBJECT_UILIMIT_EXITWINDOWS | JOB_OBJECT_UILIMIT_GLOBALATOMS |
+                            JOB_OBJECT_UILIMIT_HANDLES | JOB_OBJECT_UILIMIT_READCLIPBOARD |
+                            JOB_OBJECT_UILIMIT_WRITECLIPBOARD | JOB_OBJECT_UILIMIT_SYSTEMPARAMETERS;
 };
 
 class JobManager {
@@ -63,18 +59,17 @@ class JobManager {
     JobManager(JobManager&&) = default;
     JobManager& operator=(JobManager&&) = default;
 
-    // Create the job kernel object and apply `policy`. Idempotent — calling
-    // twice with the same instance replaces the old job.
+    // 创建 Job 内核对象并施加 policy。幂等：同一实例第二次调用会替换掉旧 Job。
     std::error_code Create(const JobPolicy& policy);
 
-    // Attach `process_handle` to this job. The process must have been created
-    // with CREATE_SUSPENDED so limits apply before it runs.
+    // 把 process_handle 塞进当前 Job。该进程必须以 CREATE_SUSPENDED 方式
+    // 创建，这样 target 在执行第一行代码之前 Job 限制就已经生效。
     std::error_code Assign(HANDLE process_handle);
 
-    // Query how many processes are currently active inside the job.
+    // 查询 Job 内当前活跃进程数。
     [[nodiscard]] std::error_code GetActiveProcessCount(DWORD& out) const;
 
-    // Enumerate PIDs of all processes still in the job. Empty on failure.
+    // 枚举 Job 内所有存活进程的 PID；失败返回空 vector。
     [[nodiscard]] std::vector<DWORD> EnumerateProcessIds() const;
 
     [[nodiscard]] HANDLE handle() const noexcept { return job_.get(); }
