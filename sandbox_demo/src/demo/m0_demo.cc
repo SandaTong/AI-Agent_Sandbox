@@ -79,12 +79,16 @@ int wmain(int argc, wchar_t** argv) {
     opts.exe_path = argv[1];
     opts.cmd_line = BuildCmdLine(argc, argv);
 
+    LOG_INFO << L"Luancher Stating...";
+
     ProcessLauncher launcher(job, token);
     LaunchResult res;
     if (auto ec = launcher.Launch(opts, res)) {
         LOG_ERROR << L"ProcessLauncher.Launch 失败: " << DescribeError(ec).c_str();
         return ec.value();
     }
+
+    LOG_INFO << L"Job 已就绪，target 已启动...";
 
     // ---------- Query ----------
     DWORD active = 0;

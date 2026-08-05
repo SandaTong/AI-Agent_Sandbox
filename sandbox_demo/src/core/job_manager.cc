@@ -9,6 +9,7 @@
 namespace sandbox {
 
 std::error_code JobManager::Create(const JobPolicy& policy) {
+    LOG_INFO << L"JobManager: job creating....";
     // 1) CreateJobObjectW：创建 Job 内核对象。第二个参数传 NULL 表示无名
     //    Job（只能通过 handle 引用，不能通过对象名 OpenJobObject 打开）。
     ScopedHandle job(::CreateJobObjectW(nullptr, nullptr));

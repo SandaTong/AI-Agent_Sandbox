@@ -43,8 +43,10 @@ endif()
 # ----- 静态库 sandbox_core：common + core ------------------------------------
 add_library(sandbox_core STATIC
     src/core/job_manager.cc
- src/core/token_manager.cc
+    src/core/token_manager.cc
     src/core/process_launcher.cc
+    src/core/mitigation.cc
+    src/core/desktop_iso.cc
 )
 target_include_directories(sandbox_core PUBLIC src)
 target_link_libraries(sandbox_core PUBLIC
@@ -58,15 +60,43 @@ target_link_libraries(sandbox_core PUBLIC
 add_executable(m0_demo src/demo/m0_demo.cc)
 target_link_libraries(m0_demo PRIVATE sandbox_core)
 
+# ----- M1 演示程序（在 M0 基础上加Low IL + Mitigation + Alt Desktop） -------
+add_executable(m1_demo src/demo/m1_demo.cc)
+target_link_libraries(m1_demo PRIVATE sandbox_core)
+
 # ----- 一个用来做冒烟对比的极简 target ---------------------------------------
 # 直接双击 -> 看到"基线"行为（Medium IL，无 Job，特权齐全）；
 # 通过 m0_demo 拉起 -> 看到"沙箱化"行为（Job + restricted token）。
 # 后续 M1 降 IL、M2 上 AppContainer 时，它打印的 integrity_level 会变化，
 # 这本身就是一个自内建的验证信号。
+#
+# 重要：hello_target 必须**静态链接 CRT**（/MT + /MTd），否则 M1 的
+# BLOCK_NON_MICROSOFT_BINARIES 会拦掉 VCRUNTIME140D.dll / ucrtbased.dll
+# 这些 debug CRT（它们不带 Microsoft 根证书签名），导致 target 启动就
+# 报 0xC0000142 (STATUS_DLL_INIT_FAILED)。静态链接后所有 CRT 代码都编进
+# hello_target.exe 自身，加载器不再拉外部 DLL，mitigation 就通过了。
 add_executable(hello_target src/demo/hello_target.cc)
 target_link_libraries(hello_target PRIVATE advapi32.lib)
+set_property(TARGET hello_target PROPERTY
+    MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+
+# ----- unsigned_probe.dll ----------------------------------------------------
+# 一个"非微软签名"的探测 DLL。基线/M0 里target 能加载成功；M1 因
+# BLOCK_NON_MICROSOFT_BINARIES 生效，LoadLibraryW 返回 nullptr，gle=577
+# (ERROR_INVALID_IMAGE_HASH)。用来干净演示 mitigation policy 的拦截。
+add_library(unsigned_probe SHARED src/demo/unsigned_probe.cc)
+set_target_properties(unsigned_probe PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/$<CONFIG>"
+    LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/$<CONFIG>"
+)
+# 同样静态链接 CRT，避免 unsigned_probe.dll 本身又依赖非签名的 debug CRT
+# DLL（那样 M1 LoadLibraryW 时会因为间接依赖再次触发 mitigation）。
+set_property(TARGET unsigned_probe PROPERTY
+    MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 
 # ----- Visual Studio 解决方案里的分组 ----------------------------------------
 set_target_properties(sandbox_core  PROPERTIES FOLDER "core")
 set_target_properties(m0_demo       PROPERTIES FOLDER "demo")
+set_target_properties(m1_demo       PROPERTIES FOLDER "demo")
 set_target_properties(hello_target  PROPERTIES FOLDER "demo")
+set_target_properties(unsigned_probe PROPERTIES FOLDER "demo")

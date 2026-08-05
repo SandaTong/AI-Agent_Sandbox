@@ -12,7 +12,7 @@ namespace sandbox {
 
 namespace {
 
-// CreateProcessAsUserW 要求命令行 buffer 是可写的（文档明确说 API 可能会
+// CreateProcessAsUserW要求命令行 buffer 是可写的（文档明确说 API 可能会
 // 往里写一个 '\0' 分割 argv[0]）。std::wstring::data() 从 C++17 起就是可写
 // 指针。
 std::wstring BuildMutableCmdLine(const LaunchOptions& opts) {
@@ -35,31 +35,51 @@ std::error_code ProcessLauncher::Launch(const LaunchOptions& opts, LaunchResult&
     if (!token_.valid())
         return MakeWinError(ERROR_INVALID_STATE);
 
-    STARTUPINFOW si{};
-    si.cb = sizeof(si);
-    PROCESS_INFORMATION pi{};
+    // 【M1】统一走 STARTUPINFOEX。即使不装 Mitigation / Desktop，用 EX
+    // 版本也不会有副作用（内核直接读StartupInfo 部分，AttributeList 为
+    // NULL 时按无扩展处理）。
+    STARTUPINFOEXW six{};
+    six.StartupInfo.cb = sizeof(STARTUPINFOEXW);
 
+    // 【M1】UI 隔离：如果提供了 DesktopIsolation，就把它的完整路径塞进
+    // lpDesktop。字符串必须**可写**（Win32 传统坑），我们保留一份 std::wstring。
+    std::wstring mutable_desktop;
+    if (opts.desktop_iso && opts.desktop_iso->valid()) {
+        mutable_desktop = opts.desktop_iso->desktop_path();
+        six.StartupInfo.lpDesktop = mutable_desktop.data();
+    }
+
+    // 【M1】Mitigation Policy：塞 attribute list。
+    if (opts.attr_list && opts.attr_list->valid()) {
+        six.lpAttributeList = opts.attr_list->ptr();
+    }
+
+    PROCESS_INFORMATION pi{};
     std::wstring cmdline = BuildMutableCmdLine(opts);
 
-    // ---- 第 1 步：CreateProcessAsUserW，带 CREATE_SUSPENDED ----
+    // ----第 1 步：CreateProcessAsUserW，带 CREATE_SUSPENDED ----
     // 关键 flag：
-    //   CREATE_SUSPENDED    — 主线程冻结，target 一行代码都没跑。
+    //   CREATE_SUSPENDED       — 主线程冻结，target 一行代码都没跑。
     //   CREATE_UNICODE_ENVIRONMENT — 用宽字符 API 必须搭配这个 flag。
-    //   EXTENDED_STARTUPINFO_PRESENT — M1 升级 STARTUPINFOEX 时会加上，
-    //     用来携带 Mitigation Policy。M0 还没到这一步。
+    //   EXTENDED_STARTUPINFO_PRESENT — 【M1】告诉内核lpStartupInfo 是
+    //   STARTUPINFOEX，需要额外读 lpAttributeList。
     //
-    // 这里 bInheritHandles 传 FALSE：target 不继承 broker 的任何 handle。
-    // M3（Broker/Target IPC）时会改成 TRUE + PROC_THREAD_ATTRIBUTE_HANDLE_LIST
-    // 白名单模式，只放通信管道那一根 handle，其他一律不给。
-    constexpr DWORD kFlags = CREATE_SUSPENDED | CREATE_UNICODE_ENVIRONMENT;
+    // bInheritHandles = FALSE：target 不继承 broker 的任何 handle。M3 时
+    // 会改成 TRUE + PROC_THREAD_ATTRIBUTE_HANDLE_LIST 白名单模式。
+    constexpr DWORD kFlags =
+        CREATE_SUSPENDED | CREATE_UNICODE_ENVIRONMENT | EXTENDED_STARTUPINFO_PRESENT;
 
     LPCWSTR working_dir = opts.working_dir.empty() ? nullptr : opts.working_dir.c_str();
 
+    // 注意：STARTUPINFOEX 通过 reinterpret_cast 传成 STARTUPINFOW*。
+    // 这是 Win32 API 规定的写法，内核会根据 kFlags 里的
+    // EXTENDED_STARTUPINFO_PRESENT 决定按扩展结构解析。
     if (!::CreateProcessAsUserW(token_.handle(), opts.exe_path.c_str(), cmdline.data(),
-                                /*proc sec  */ nullptr,
-                                /*thread sec*/ nullptr,
-                                /*inherit   */ FALSE, kFlags,
-                                /*env       */ nullptr, working_dir, &si, &pi)) {
+                                /*proc sec   */ nullptr,
+                                /*thread sec */ nullptr,
+                                /*inherit    */ FALSE, kFlags,
+                                /*env        */ nullptr, working_dir,
+                                reinterpret_cast<LPSTARTUPINFOW>(&six), &pi)) {
         return LastError();
     }
 
@@ -68,14 +88,12 @@ std::error_code ProcessLauncher::Launch(const LaunchOptions& opts, LaunchResult&
     ScopedHandle proc(pi.hProcess);
     ScopedHandle thread(pi.hThread);
 
-    // ---- 第 2 步：在 target 开始跑之前挂到 Job 上 ----
+    // ---- 第 2 步：在 target 开始跑之前挂到Job 上 ----
     if (auto ec = job_.Assign(proc.get())) {
         LOG_ERROR << L"AssignProcessToJobObject failed: " << ec.value();
         ::TerminateProcess(proc.get(), 1);
         return ec;
     }
-
-    // ---- （M1 会在此插入：设 IL / 装 mitigation） ----
 
     // ---- 第 3 步：Resume 主线程；target 此刻真正开始执行 ----
     if (::ResumeThread(thread.get()) == static_cast<DWORD>(-1)) {
@@ -104,7 +122,7 @@ std::error_code ProcessLauncher::WaitForExit(HANDLE process, std::chrono::millis
         ms = INFINITE;
     } else if (timeout.count() >= INFINITE) {
         // WaitForSingleObject 用 0xFFFFFFFF (INFINITE) 作为哨兵值，任何合法
-        // 的有限 timeout 必须严格小于它。这里 clamp 到最大可用有限值。
+        // 的有限 timeout 必须严格小于它。这里clamp 到最大可用有限值。
         ms = INFINITE - 1;
     } else {
         ms = static_cast<DWORD>(timeout.count());

@@ -50,21 +50,28 @@
                     └───────────────────────────┘
 ```
 
-### 当前态（M0，已完成）
+### 当前态（M1，已完成）
 
 ```
-    ┌──────────── m0_demo.exe ────────────┐
-    │  JobManager  +  TokenManager        │
-    │       │              │              │
-    │       └──ProcessLauncher───────┐│
-    │                                │    │
-    │  CreateProcessAsUserW│    │
-    │    (CREATE_SUSPENDED)          │    │
-    │    → AssignProcessToJobObject│    │
-    │    → ResumeThread              │    │
-    └────────────────────────────────┼────┘
-                                     ▼
-                              target.exe (被 job 关起来)
+    ┌──────────── m1_demo.exe（Broker 雏形）──────────────┐
+    │                                                     │
+    │  JobManager   +   TokenManager   +   MitigationList │
+    │       │    │(+ Low IL)          │           │
+    │       │              │                │      │
+    │       └──ProcessLauncher─────────────────────┘      │
+    │                │                               │
+    │      + DesktopIsolation (WinSta+Desktop)            │
+    │                     ▼                    │
+    │   CreateProcessAsUserW│
+    │     (CREATE_SUSPENDED + STARTUPINFOEX│
+    │      + Mitigation Policy + Low IL)                  │
+    │     → AssignProcessToJobObject                      │
+    │     → ResumeThread                                  │
+    └─────────────────────┬───────────────────────────────┘
+                          ▼
+                target.exe（Low IL + 8 项 Mitigation
+                       + 独立 winsta/desktop
+                       + Job 资源上限 + Restricted Token）
 ```
 
 ---
@@ -74,8 +81,8 @@
 | Day | Milestone | 交付物 | JD 命中 | 状态 |
 |---|---|---|---|---|
 | D1 | **M0** 基础闭环 | Job / Token / CREATE_SUSPENDED 三步舞 | W1 | ✅ 完成 |
-| D2-3 | **M1** 进程加固 | Low IL + STARTUPINFOEX + 8 项 Mitigation Policy + Alternate Desktop | W1 | ⏳ 待开工 |
-| D4-5 | **M2** 现代沙箱 | AppContainer / LowBox Token + Capability SID | W1 | ⏳ |
+| D2-3 | **M1** 进程加固 | Low IL + STARTUPINFOEX + 8 项 Mitigation Policy + Alternate Desktop | W1 | ✅ 完成 |
+| D4-5 | **M2** 现代沙箱 | AppContainer / LowBox Token + Capability SID | W1 | ⏳ 待开工 |
 | D6 | **M3** Broker/Target 双进程 + Named-Pipe IPC | 拆成 `broker.exe` + `target.exe` | W1/W5 | ⏳ |
 | D7-8 | **M4** 注入与 Hook（正向） | `injector.exe` + MinHook 拦截 `CreateFileW` | W4 | ⏳ |
 | D9 | **M5** 反注入与运行时检测 | `LdrRegisterDllNotification` + 模块白名单 + 远程线程检测 | W4 | ⏳ |
@@ -100,18 +107,22 @@
 ```
 sandbox_demo/
 ├─ CMakeLists.txt           顶层 CMake：分层子目标 + MSVC 硬化选项
-├─ build.bat / run.bat      一键脚本
+├─ build.bat / run.bat / run_m1.bat / run_baseline.bat      一键脚本
 ├─ src/
 │  ├─ common/               无状态工具，所有模块共用
 │  │  ├─ scoped_handle.h    RAII HANDLE 五法则封装
 │  │  ├─ win_error.h        GetLastError → std::error_code
-│  │  └─ logger.h           线程安全宽字符 stdout logger
+│  │  └─ logger.h           线程安全宽字符 stdout logger（UTF-16 控制台）
 │  ├─ core/                 沙箱能力砖块
-│  │  ├─ job_manager.{h,cc}       Job Object（W1）
-│  │  ├─ token_manager.{h,cc}     Restricted Token（W1）
-│  │  └─ process_launcher.{h,cc}  串接Job+Token+CREATE_SUSPENDED
+│  │  ├─ job_manager.{h,cc}       Job Object（W1，M0）
+│  │  ├─ token_manager.{h,cc}     Restricted Token + Low IL（W1，M0/M1）
+│  │  ├─ mitigation.{h,cc}        STARTUPINFOEX + Mitigation Policy（W1，M1）
+│  │  ├─ desktop_iso.{h,cc}       Alternate WinStation+Desktop（W1，M1）
+│  │  └─ process_launcher.{h,cc}  串接 Job+Token+IL+Mitigation+Desktop
 │  └─ demo/
-│     └─ m0_demo.cc         M0 冒烟主程序
+│     ├─ hello_target.cc         被沙箱化的目标示例（打印 IL 供验证）
+│     ├─ m0_demo.cc              M0 冒烟：Job + Restricted Token
+│     └─ m1_demo.cc              M1 冒烟：+ Low IL + Mitigation + Desktop 隔离
 ├─ tests/                   越狱测试用例（M10）
 └─ docs/
    └─ notes/                每个 milestone 的学习笔记（面试口径）
@@ -190,12 +201,46 @@ run.bat "C:\Windows\System32\calc.exe"
 
 **面试锚点**：见 [`docs/notes/M0.md`](sandbox_demo/docs/notes/M0.md)。
 
-### ⏳ M1 — 进程加固：Integrity Level + Mitigation Policy + Alternate Desktop
+### ✅ M1 — 进程加固：Low IL + Mitigation Policy + Alternate Desktop
 
-即将开工。计划：
-- `TokenManager::SetIntegrityLevel(Low)` —完整性等级降到 Low，隔离普通桌面文件访问
-- `STARTUPINFOEX` + `UpdateProcThreadAttribute(PROC_THREAD_ATTRIBUTE_MITIGATION_POLICY)` 一次装 8 项策略：`BLOCK_NON_MICROSOFT_BINARIES` / `PROHIBIT_DYNAMIC_CODE` / `CHILD_PROCESS_RESTRICTED` / ASLR force-relocate / ...
-- `CreateWindowStation` + `CreateDesktop`，把 target塞进独立 winsta+desktop，防截屏、防 UI 提权
+**在 M0 基础上叠加的三层护栏**：
+
+1. **Low Integrity Level** — 用 `SetTokenInformation(TokenIntegrityLevel)` 把 target 的 Mandatory Label 改成 `S-1-16-4096`。降完后 target 想写你桌面上的文件返回 `ACCESS_DENIED`（NTFS mandatory label ACE 一票否决）。
+2. **STARTUPINFOEX + 8 项 Mitigation Policy**：
+   - DEP + 强 ASLR + Force Relocate
+   - `BLOCK_NON_MICROSOFT_BINARIES` —— 只允许微软签名的 DLL 加载（**反注入绝杀**）
+   - `PROHIBIT_DYNAMIC_CODE` —— 禁 JIT / shellcode
+   - `EXTENSION_POINT_DISABLE` —— 拦 AppInit_DLLs / SetWindowsHookEx 全局钩子
+   - `IMAGE_LOAD_NO_REMOTE` / `NO_LOW_LABEL`
+   - **独立槽位**：`CHILD_PROCESS_RESTRICTED` —— 禁 target 起子进程
+3. **Alternate WindowStation + Desktop** — `CreateWindowStation` + `CreateDesktop` 造一对独立 winsta/desktop（SDDL显式带 DACL + Mandatory Label = Low），target 通过 `STARTUPINFO::lpDesktop` 被塞进去；`EnumWindows` 出来看不到用户桌面的窗口。
+
+**新增关键 API**：`SetTokenInformation` / `ConvertStringSidToSidW` / `InitializeProcThreadAttributeList` / `UpdateProcThreadAttribute` / `CreateWindowStationW` / `CreateDesktopW` / `ConvertStringSecurityDescriptorToSecurityDescriptorW` / `STARTUPINFOEX::lpAttributeList`。
+
+#### M1 越狱测试实测结果
+
+| # | 越狱动作 | baseline | M0 | **M1** | M1 拦截机制 |
+|---|---|---|---|---|---|
+| 1 | 写用户桌面文件 | SUCCESS | SUCCESS | **BLOCKED (gle=5)** | Low IL / NTFS mandatory ACE |
+| 2 | `CreateProcess("cmd.exe")` | SUCCESS | SUCCESS | **BLOCKED (gle=367)** | `CHILD_PROCESS_POLICY` |
+| 3 | `VirtualAlloc(RWX)` | SUCCESS | SUCCESS | **BLOCKED (gle=1655)** | `PROHIBIT_DYNAMIC_CODE` |
+| 4 | 加载非签名 DLL | SUCCESS | SUCCESS | **BLOCKED (gle=577)** ⭐ | `BLOCK_NON_MICROSOFT_BINARIES` |
+| 5 | 读剪贴板 | SUCCESS | SUCCESS | **BLOCKED (gle=5)** | Job `UILIMIT_READCLIPBOARD` |
+
+**M0 拦 0/5，M1 拦 5/5**。gle=577 (ERROR_INVALID_IMAGE_HASH) 是 mitigation policy 生效的**内核层证据**——内核在 Authenticode 校验路径把 DLL 拒了，不是 API 层伪拦。
+
+#### M1 踩坑精华（4 个 `0xC0000142`）
+
+M1 让 target 稳定起来一路踩了 4 个坑，每一个都是 Windows 沙箱工程师的必修课：
+
+1. **`BLOCK_NON_MICROSOFT_BINARIES` 拦 Debug CRT** —— Debug CRT DLL是微软发布但不带微软根签名，被 mitigation 拒。修：target 静态链接 CRT（`/MTd`）
+2. **`SetSecurityInfo` 缺 `WRITE_DAC`** —— `WINSTA_ALL_ACCESS` 不含 `WRITE_DAC`。修：Create 时通过 `SECURITY_ATTRIBUTES` 一次到位
+3. **Job UI 限制 vs Alt Desktop冲突** —— `NtUserOpenDesktop` 被 `UILIMIT_DESKTOP` 拦。修：Alt Desktop 场景下清掉 Job UI 限制的 DESKTOP + HANDLES 位
+4. **Mandatory Label 阻断 Low IL 进 desktop** —— Windows 访问检查是"DACL AND Mandatory Label"双门。修：SDDL 里加 `S:(ML;;;;;LW)` 把 desktop 完整性门槛降到 Low
+
+详见 [`docs/notes/M1.md`](sandbox_demo/docs/notes/M1.md)第七节（含 4 条金牌面试话术）。
+
+**运行**：`run_m1.bat`，或 `.\build_m0\Debug\m1_demo.exe [--strict N] [--no-il] [--no-desk] <target.exe>`
 
 ### ⏳ M2 及以后 — 见 Roadmap 表
 

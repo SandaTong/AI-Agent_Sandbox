@@ -3,21 +3,20 @@
 // -----------------------------------------------------------------------------
 // 负责编排沙箱子进程的启动流水线，按正确顺序执行：
 //
-//     1. CreateProcessAsUserW（带 CREATE_SUSPENDED，主线程冻结）
-//     2. AssignProcessToJobObject（进 Job）
-//     3.（M1）SetTokenInformation 降 Integrity Level
-// 4.（M1）STARTUPINFOEX 装 Mitigation Policy
-//   5. ResumeThread —— target 此刻才开始执行用户代码
+//     1. TokenManager.CreateRestricted()  已在 M0 完成
+//     2. TokenManager.SetIntegrityLevel(Low)          【M1 新增】
+//     3. MitigationAttrList.Configure(...)            【M1 新增，装入 STARTUPINFOEX】
+//     4. DesktopIsolation.Create()【M1 新增，可选】
+//     5. CreateProcessAsUserW（CREATE_SUSPENDED + EXTENDED_STARTUPINFO_PRESENT）
+//     6. AssignProcessToJobObject
+//     7. ResumeThread —— target 此刻才开始执行用户代码
 //
 // 对应 JD:
 //   W1 — 进程管控 / 沙箱加固 / 权限收敛
 //
-// 修复的硬伤（相比初版）:
-//   原来是 CreateProcessAsUserW 不带 CREATE_SUSPENDED，进程一创建就开跑，
-//   然后再 AssignProcessToJobObject。这样从"进程开始执行"到"Job 限制生效"
-//   之间存在一个不确定长度的时间窗口，target 可以在这个窗口里为所欲为
-//   （分配大内存 / 起线程 / 写剪贴板 / 甚至 fork 子进程逃出）。
-//   CREATE_SUSPENDED 把这个窗口消掉：Job 装完 -> 才 Resume。
+// 关于 CREATE_SUSPENDED 三步舞的说明保留在 M0 版本，见 process_launcher.cc。
+// M1 的关键升级点：从 STARTUPINFOW -> STARTUPINFOEX，用lpAttributeList 携带
+// Mitigation Policy；同时用 lpDesktop 携带 "winsta\\desktop" 路径。
 // -----------------------------------------------------------------------------
 #pragma once
 
@@ -28,7 +27,9 @@
 #include <system_error>
 
 #include "common/scoped_handle.h"
+#include "core/desktop_iso.h"
 #include "core/job_manager.h"
+#include "core/mitigation.h"
 #include "core/token_manager.h"
 
 namespace sandbox {
@@ -37,6 +38,14 @@ struct LaunchOptions {
     std::wstring exe_path;     // 可执行文件绝对路径
     std::wstring cmd_line;     // 完整命令行；为空时会自动拼一个
     std::wstring working_dir;  // 工作目录；为空表示继承 broker 的
+
+    // 【M1】可选：如果给了 desktop_iso，target 会被绑到该隔离桌面。
+    // nullptr 表示不做 UI 隔离，target 与 broker 共享 default desktop。
+    const DesktopIsolation* desktop_iso = nullptr;
+
+    // 【M1】可选：如果给了 attr_list，target 会走 STARTUPINFOEX 加载 Mitigation。
+    // nullptr 表示不装 Mitigation Policy。
+    const MitigationAttrList* attr_list = nullptr;
 };
 
 struct LaunchResult {
