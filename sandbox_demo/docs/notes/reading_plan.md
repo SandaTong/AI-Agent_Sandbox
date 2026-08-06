@@ -291,7 +291,9 @@ Mandatory Label 段落尤其关键——你会看到 `SECURITY_MANDATORY_LOW_RID
 
 工程内文档：
 - `docs/notes/M0.md` — 已写，含 3 个硬伤修复的完整叙述
-- `docs/notes/M<x>.md` — 每个 milestone 完成后补上
+- `docs/notes/M1.md` — M1 完整笔记 + 7 章 + 4 个 0xC0000142 坑 + 4 条金牌话术
+- `docs/notes/M2.md` — M2 完整笔记 + 12 章 + Firewall 加餐 + 6 条金牌话术
+- **`docs/notes/kernel_objects_101.md`** ⭐ — **横切基础**：Object Manager / OBJECT_TYPE / HANDLE 表 / SeAccessCheck / KILL_ON_JOB_CLOSE 回调 / AppContainer 命名空间前缀劫持。所有 milestone 遇到"内核里到底怎么实现的"这类问题先来这里查
 - `README.md` — 工程总览 + JD 关键词映射
 
 外部快查：
