@@ -1,8 +1,8 @@
 # 项目记忆 — sandbox_demo (Windows 沙箱)
 
 ## 项目目标
-基于 Windows 安全机制实现一个进程沙箱。当前已推进到 M1(在 M0 双支柱基础上叠加 Low IL + Mitigation Policy + Desktop 隔离)。
-后续有 M2/M3 路线图。
+基于 Windows 安全机制实现一个进程沙箱。当前已推进到 M2(在 M1 基础上叠加 AppContainer + Capability 白名单 + Firewall 规则)。
+后续有 M3 路线图。
 
 ## M0 架构(双支柱 + 三步舞)
 - **支柱一 TokenManager**(`core/token_manager.cc`):`CreateRestrictedToken(DISABLE_MAX_PRIVILEGE)`
@@ -35,7 +35,29 @@
   - CHILD_PROCESS_RESTRICTED 是独立属性 PROC_THREAD_ATTRIBUTE_CHILD_PROCESS_POLICY,不在 Mitigation 位图里。
   - 新增 `core/desktop_iso.{h,cc}`:Alt WindowStation+Desktop UI 隔离,需 GrantAccessToLowIntegrity 授权给 Low IL target。
   - `demo/m1_demo.cc`:Job+Token(IL=Low)+Mitigation+Desktop 四件套组装;--strict N 可 bisect。
-- M2: NtCreateLowBoxToken 生成 AppContainer 的 LowBox Token。
+- M2: ~~NtCreateLowBoxToken 生成 AppContainer 的 LowBox Token。~~ 已完成。
+  - 新增 `core/appcontainer.{h,cc}`:`AppContainer` 类封装 profile/SID/capability。
+    `CreateAppContainerProfile` 注册 profile(同名幂等,已存在则 `DeriveAppContainerSidFromAppContainerName` 复用),
+    得到 Package SID(形如 S-1-15-2-...)。
+    `AddCapability` 把 well-known capability(internetClient=S-1-15-3-1 等)转成 SID 存入。
+    `View()` 组装 `SECURITY_CAPABILITIES` 结构(AppContainerSid + Capabilities 数组 + Count)。
+    注意:用户态 API 叫 SECURITY_CAPABILITIES,"LowBox" 是内核术语。
+  - 新增 `core/firewall.{h,cc}`:`FirewallGuard` 用 INetFwPolicy2 COM 给 Package SID 写
+    outbound TCP Block 规则(需管理员权限,非管理员 E_ACCESSDENIED 只警告)。析构自动删规则。
+    原因:AppContainer 单靠自身**不禁网**,出方向必须 broker 主动写 firewall 规则。
+  - `MitigationAttrList::Configure` 新增第三参数 `sec_caps`(SECURITY_CAPABILITIES*),
+    内部装 `PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES` 属性槽 → 内核创建 EPROCESS 时走 AppContainer 访问检查路径。
+  - `demo/m2_demo.cc`:AppContainer + Job + Token(IL=Low)+ Mitigation + Firewall 五件套组装。
+    `--net` 加 internetClient capability 并跳过 firewall block;不带则出方向被拦(WSAEACCES)。
+  - **M2 踩坑(重要)**:
+    1. alt desktop 默认**关**:AppContainer 自带独立 winsta/desktop 命名空间
+       (\Sessions\<n>\AppContainerNamedObjects\<pkg_sid>\),再叠加手工 alt desktop 会冲突
+       → 0xC0000142 STATUS_DLL_INIT_FAILED。Chromium AppContainer 分支也不做 alt desktop。
+       `--desk` 反向开关保留只为复现坑。
+    2. `strict_signed_dll`(BLOCK_NON_MICROSOFT_BINARIES)在 M2 里**关掉**:
+      AppContainer runtime 需加载非微软签名 DLL(如 winsock helper),强开会挂。
+    3. AppContainer target 走私有命名空间,看不见 broker 的 global mutex(演示 namespace isolation)。
+  - **与 M1 的本质区别**:M1 Restricted Token 是"你原来是谁 - 去掉权限";M2 LowBox 是"换成新身份(Package SID),完全不同访问检查路径,默认拒绝,声明什么才能用什么"。
 - M3: Broker/Target IPC(handle 白名单 PROC_THREAD_ATTRIBUTE_HANDLE_LIST)。
 
 ## 技术约定
