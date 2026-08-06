@@ -40,13 +40,15 @@ if(MSVC)
     )
 endif()
 
-# ----- 静态库 sandbox_core：common + core ------------------------------------
+# -----静态库 sandbox_core：common + core------------------------------------
 add_library(sandbox_core STATIC
     src/core/job_manager.cc
     src/core/token_manager.cc
     src/core/process_launcher.cc
     src/core/mitigation.cc
     src/core/desktop_iso.cc
+    src/core/appcontainer.cc
+    src/core/firewall.cc
 )
 target_include_directories(sandbox_core PUBLIC src)
 target_link_libraries(sandbox_core PUBLIC
@@ -63,6 +65,10 @@ target_link_libraries(m0_demo PRIVATE sandbox_core)
 # ----- M1 演示程序（在 M0 基础上加Low IL + Mitigation + Alt Desktop） -------
 add_executable(m1_demo src/demo/m1_demo.cc)
 target_link_libraries(m1_demo PRIVATE sandbox_core)
+
+# ----- M2 演示程序（在 M1 基础上加 AppContainer + Capability） --------------
+add_executable(m2_demo src/demo/m2_demo.cc)
+target_link_libraries(m2_demo PRIVATE sandbox_core)
 
 # ----- 一个用来做冒烟对比的极简 target ---------------------------------------
 # 直接双击 -> 看到"基线"行为（Medium IL，无 Job，特权齐全）；
@@ -98,5 +104,6 @@ set_property(TARGET unsigned_probe PROPERTY
 set_target_properties(sandbox_core  PROPERTIES FOLDER "core")
 set_target_properties(m0_demo       PROPERTIES FOLDER "demo")
 set_target_properties(m1_demo       PROPERTIES FOLDER "demo")
+set_target_properties(m2_demo       PROPERTIES FOLDER "demo")
 set_target_properties(hello_target  PROPERTIES FOLDER "demo")
 set_target_properties(unsigned_probe PROPERTIES FOLDER "demo")

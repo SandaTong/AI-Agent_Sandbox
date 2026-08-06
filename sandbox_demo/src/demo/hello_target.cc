@@ -13,13 +13,17 @@
 //   测试 5：读剪贴板→ 拦的层：Job UI 限制 READCLIPBOARD
 // -----------------------------------------------------------------------------
 #include <windows.h>
+#include <winsock2.h>
+#include <ws2tcpip.h>
 
 #include <cstdio>
 #include <cstdlib>
 #include <cwchar>
 #include <fcntl.h>  // _O_U16TEXT
 #include <io.h>     // _setmode / _fileno
-#include <string>   // std::wstring（jailbreak-4 拼 DLL 路径用）
+#include <string>   // std::wstring（jailbreak-4拼 DLL 路径用）
+
+#pragma comment(lib, "ws2_32.lib")
 
 namespace {
 
@@ -151,7 +155,7 @@ void Test5_ReadClipboard() {
     if (!::OpenClipboard(nullptr)) {
         // 有些沙箱直接连 OpenClipboard 都拦（AppContainer 会这样），这里
         // 视作"更严"级别的 BLOCKED。
-        std::wprintf(L"  [jailbreak-5] 读剪贴板         : BLOCKED  (gle=%lu, open 失败)\n",
+        std::wprintf(L"  [jailbreak-5] 读剪贴板         : BLOCKED(gle=%lu, open 失败)\n",
                      ::GetLastError());
         return;
     }
@@ -168,6 +172,102 @@ void Test5_ReadClipboard() {
                               : (gle == 0)                 ? L" (剪贴板可能就是空的，非拦截)"
                                                            : L"";
         std::wprintf(L"  [jailbreak-5] 读剪贴板         : BLOCKED  (gle=%lu)%ls\n", gle, hint);
+    }
+}
+
+// ---- M2 新增两个越狱测试：AppContainer 命名空间/网络---------------------
+
+void Test6_OpenGlobalNamedObject() {
+    // AppContainer 有独立的对象命名空间：
+    //   \Sessions\<n>\AppContainerNamedObjects\<pkg_sid>\
+    // target 尝试打开 global BaseNamedObjects 下的对象会被 LowBox 访问检
+    // 查拦下（也可能是 FILE_NOT_FOUND —— 因为它看的是自己私有的一份根本
+    // 没这个对象）。M0/ M1 走共享 BaseNamedObjects，理论上能开成功。
+    //
+    // 但**必须选一个稳定存在的global对象**才有意义。第一版用了
+    // "Global\\ShimCacheMutex"——在裸奔进程都返回 FILE_NOT_FOUND，因为
+    // Win10/11 上这个名字已经不稳定存在了，测试变成假阳性。
+    //
+    // 换成 broker 约定：**broker 起 target 前必须先在自己进程里 CreateMutexW
+    // 一个名叫 "Global\\WEMEET_SANDBOX_PROBE_MUTEX" 的 mutex 并持有 HANDLE**。
+    // 于是：
+    //   * baseline / M0 / M1 target：能在共享 \BaseNamedObjects\ 下看到
+    //     broker 建的这个 mutex → OpenMutexW SUCCESS
+    //   * M2 AppContainer target：走私有 \Sessions\<n>\AppContainer-
+    //     NamedObjects\<pkg_sid>\，看不到 broker 的对象 → FILE_NOT_FOUND
+    //
+    // ⚠️ 如果你直接双击 hello_target.exe（没有 broker）跑，这项会
+    // FILE_NOT_FOUND，属于**正常**——因为没人建过那个 mutex。
+    static constexpr const wchar_t* kProbeMutex = L"Global\\WEMEET_SANDBOX_PROBE_MUTEX";
+    HANDLE h = ::OpenMutexW(SYNCHRONIZE, FALSE, kProbeMutex);
+    if (h) {
+        ::CloseHandle(h);
+        std::wprintf(L"  [jailbreak-6] 打开 global mutex : SUCCESS (沙箱漏了!)\n");
+    } else {
+        DWORD gle = ::GetLastError();
+        const wchar_t* hint = (gle == ERROR_ACCESS_DENIED)    ? L" (AppContainer 命名空间拦下)"
+                              : (gle == ERROR_FILE_NOT_FOUND) ? L" (私有命名空间/无 broker 造)"
+                                                              : L"";
+        std::wprintf(L"  [jailbreak-6] 打开 global mutex : BLOCKED  (gle=%lu)%ls\n", gle, hint);
+    }
+}
+
+void Test7_TryNetworkConnect() {
+    // AppContainer 网络策略【实测校准结论】完全依赖 Windows Firewall 用户
+    // 态规则引擎（M2 加餐补丁前 target 网络出方向一路漏，见 docs/notes/
+    // M2.md § 九、十一）。加餐补丁后 broker 通过 INetFwPolicy2 COM API 加了
+    // 一条针对 Package SID 的 outbound TCP block 规则，此时**公网出方向**
+    // 才会真被拦。
+    //
+    // ⚠️ 关键陷阱：**Windows Firewall 对 loopback (127.0.0.1 / ::1) 流量
+    //    有 bypass**——mpssvc 判定引擎不对回环走规则匹配路径。所以我们必
+    //    须打**公网 IP** 才能观察到firewall 规则的效果。这里选 8.8.8.8:80
+    //    （Google DNS 永远可达的服务器），SYN 会在规则表判定阶段被拒。
+    //
+    // 判定：
+    //   * baseline / M0 / M1：路径通到公网，SYN 出去了，可能连上 (r=0) 或
+    //     等超时 (WSAETIMEDOUT)—— 无论哪种都算 SUCCESS
+    //   * M2 无 firewall 规则（broker 非管理员或没加）：同上SUCCESS
+    //   * M2 有 firewall 规则（管理员+ 加餐补丁生效）：WSAEACCES (10013) BLOCKED ⭐
+    //   * M2 --net：broker 跳过加规则，SUCCESS
+    WSADATA wsa{};
+    if (::WSAStartup(MAKEWORD(2, 2), &wsa) != 0) {
+        std::wprintf(L"  [jailbreak-7] TCP 8.8.8.8:80    : BLOCKED  (WSAStartup 失败)\n");
+        return;
+    }
+    SOCKET s = ::socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if (s == INVALID_SOCKET) {
+        std::wprintf(L"  [jailbreak-7] TCP 8.8.8.8:80    : BLOCKED  (socket() gle=%d)\n",
+                     ::WSAGetLastError());
+        ::WSACleanup();
+        return;
+    }
+    sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_port = ::htons(80);
+    ::inet_pton(AF_INET, "8.8.8.8", &addr.sin_addr);
+
+    DWORD timeout_ms = 1500;
+    ::setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, reinterpret_cast<const char*>(&timeout_ms),
+                 sizeof(timeout_ms));
+
+    int r = ::connect(s, reinterpret_cast<sockaddr*>(&addr), sizeof(addr));
+    int err = ::WSAGetLastError();
+    ::closesocket(s);
+    ::WSACleanup();
+
+    // WSAEACCES (10013)     -> firewall 规则拦下(M2 加餐补丁生效)
+    // r == 0 / WSAETIMEDOUT -> SYN 发出去了，沙箱没拦
+    if (err == WSAEACCES) {
+        std::wprintf(
+            L"  [jailbreak-7] TCP 8.8.8.8:80    : BLOCKED  (WSAErr=%d, Firewall 规则拦下)\n", err);
+    } else if (r == 0 || err == WSAETIMEDOUT) {
+        std::wprintf(
+            L"  [jailbreak-7] TCP 8.8.8.8:80    : SUCCESS (SYN 出去了，沙箱没拦，WSAErr=%d)\n",
+            err);
+    } else {
+        std::wprintf(L"  [jailbreak-7] TCP 8.8.8.8:80    : ??  (WSAErr=%d 请对照 winerror.h)\n",
+                     err);
     }
 }
 
@@ -224,6 +324,8 @@ int wmain() {
     Test3_AllocRWXMemory();
     Test4_LoadUnsignedDll();
     Test5_ReadClipboard();
+    Test6_OpenGlobalNamedObject();
+    Test7_TryNetworkConnect();
     std::wprintf(L"[target] === 越狱测试结束 ===\n\n");
 
     std::wprintf(L"[target] 每 2 秒发一次心跳。按 Ctrl+C 或关闭窗口即可退出。\n");

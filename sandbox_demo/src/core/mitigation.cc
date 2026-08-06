@@ -90,18 +90,21 @@ void MitigationAttrList::Reset() {
     parent_process_ = nullptr;
 }
 
-std::error_code MitigationAttrList::Configure(const MitigationConfig& config,
-                                              HANDLE parent_process) {
+std::error_code MitigationAttrList::Configure(const MitigationConfig& config, HANDLE parent_process,
+                                              const SECURITY_CAPABILITIES* sec_caps) {
     Reset();
 
     // 计算这次要装几个属性槽位。
     // 槽位 1：PROC_THREAD_ATTRIBUTE_MITIGATION_POLICY（一定装）
     // 槽位 2（可选）：PROC_THREAD_ATTRIBUTE_CHILD_PROCESS_POLICY
     // 槽位 3（可选）：PROC_THREAD_ATTRIBUTE_PARENT_PROCESS（M3 会用）
+    // 槽位 4（可选）：PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES（M2 AppContainer）
     DWORD attr_count = 1;
     if (config.disable_child_process)
         ++attr_count;
     if (parent_process != nullptr)
+        ++attr_count;
+    if (sec_caps != nullptr)
         ++attr_count;
 
     // Step 1: 问系统这个属性列表需要多大buffer（两阶段调用）。
@@ -123,7 +126,6 @@ std::error_code MitigationAttrList::Configure(const MitigationConfig& config,
     ComposeMitigationBits(config, mitigation_bits_[0], mitigation_bits_[1]);
 
     // Win10+ 用 2 个 DWORD64（16 字节），旧系统只支持 1 个（8 字节）。
-    // 为了兼容，如果 mitigation_bits_[1] == 0 就只塞 8 字节。
     const SIZE_T mit_size = (mitigation_bits_[1] != 0) ? sizeof(mitigation_bits_) : sizeof(DWORD64);
 
     if (!::UpdateProcThreadAttribute(list, /*flags*/ 0, PROC_THREAD_ATTRIBUTE_MITIGATION_POLICY,
@@ -132,10 +134,7 @@ std::error_code MitigationAttrList::Configure(const MitigationConfig& config,
         return LastError();
     }
 
-    // Step 3（可选）：Child Process Policy。这个属性是"独立槽位"，跟
-    // Mitigation Policy 位图不重合。
-    // ALWAYS_ON 表示"子进程 == 立刻退出"，target 想CreateProcess 会被内核
-    // 直接拒绝，错误码 5(ACCESS_DENIED)。
+    // Step 3（可选）：Child Process Policy。
     static DWORD kChildPolicyDeny = PROCESS_CREATION_CHILD_PROCESS_RESTRICTED;
     if (config.disable_child_process) {
         if (!::UpdateProcThreadAttribute(list, 0, PROC_THREAD_ATTRIBUTE_CHILD_PROCESS_POLICY,
@@ -145,8 +144,7 @@ std::error_code MitigationAttrList::Configure(const MitigationConfig& config,
         }
     }
 
-    // Step 4（可选）：Parent Process 绑定。M3 起我们用它来防"PPID 伪造"，
-    // 并让 target 从指定进程继承 handle。M1 传nullptr，不进这个分支。
+    // Step 4（可选）：Parent Process 绑定。M3 起会用。
     if (parent_process != nullptr) {
         parent_process_ = parent_process;
         if (!::UpdateProcThreadAttribute(list, 0, PROC_THREAD_ATTRIBUTE_PARENT_PROCESS,
@@ -156,9 +154,25 @@ std::error_code MitigationAttrList::Configure(const MitigationConfig& config,
         }
     }
 
-    LOG_INFO << L"MitigationAttrList: 已装配" << L" policy=0x" << std::hex << mitigation_bits_[0]
+    // Step 5（可选）：SECURITY_CAPABILITIES ——把 target 绑到 AppContainer。
+    // 内核识别到这个属性后，target 的主SID 会从"你的用户 SID"变成
+    // AppContainer 的 package SID (S-1-15-2-...)，走LowBox 访问检查路径。
+    // 注意 sec_caps 指向的内存要在 CreateProcess 期间存活；这里UpdateProc-
+    // ThreadAttribute 是**按值拷贝指针**进 attr list，实际使用发生在
+    // CreateProcess 里，我们要求调用方保证 AppContainer 对象在 launch 期间
+    // 都活着即可。
+    if (sec_caps != nullptr) {
+        if (!::UpdateProcThreadAttribute(list, 0, PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES,
+                                         const_cast<SECURITY_CAPABILITIES*>(sec_caps),
+                                         sizeof(SECURITY_CAPABILITIES), nullptr, nullptr)) {
+            return LastError();
+        }
+    }
+
+    LOG_INFO << L"MitigationAttrList: 已装配policy=0x" << std::hex << mitigation_bits_[0]
              << L" policy2=0x" << mitigation_bits_[1] << std::dec << L" child_process_disabled="
-             << (config.disable_child_process ? 1 : 0);
+             << (config.disable_child_process ? 1 : 0) << L" appcontainer="
+             << (sec_caps != nullptr ? 1 : 0);
     return {};
 }
 

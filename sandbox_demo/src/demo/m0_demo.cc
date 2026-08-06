@@ -58,6 +58,15 @@ int wmain(int argc, wchar_t** argv) {
 
     using namespace sandbox;
 
+    // ---- broker 提前建一个 probe mutex，让 target 的 jailbreak-6 有靶子 ----
+    // 见 hello_target.cc::Test6_OpenGlobalNamedObject 的注释。
+    // 我们持有 HANDLE 直到进程退出（wmain 返回时RAII 关闭），mutex 就活着。
+    HANDLE probe_mutex = ::CreateMutexW(nullptr, FALSE, L"Global\\WEMEET_SANDBOX_PROBE_MUTEX");
+    if (!probe_mutex) {
+        LOG_WARN << L"probe mutex 创建失败(gle=" << ::GetLastError()
+                 << L")，jailbreak-6 结果可能失真";
+    }
+
     // ---------- Job ----------
     JobManager job;
     JobPolicy policy;

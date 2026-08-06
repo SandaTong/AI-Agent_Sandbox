@@ -242,7 +242,45 @@ M1 让 target 稳定起来一路踩了 4 个坑，每一个都是 Windows 沙箱
 
 **运行**：`run_m1.bat`，或 `.\build_m0\Debug\m1_demo.exe [--strict N] [--no-il] [--no-desk] <target.exe>`
 
-### ⏳ M2 及以后 — 见 Roadmap 表
+### ✅ M2 — AppContainer / LowBox Token（Chromium renderer 级隔离）
+
+**在 M1 基础上把 target塞进 AppContainer**——独立 Package SID + 独立命名空间 + Capability 白名单。这是 Windows 用户态沙箱的顶配（UWP / Edge renderer / Windows Sandbox 都是这一套）。
+
+三件套：
+
+1. **AppContainer Profile**（`CreateAppContainerProfile`）—— 系统级注册，产出独一无二的 **Package SID**（`S-1-15-2-...`）
+2. **独立对象命名空间** —— target 看到的 `\BaseNamedObjects\` 实际映射到 `\Sessions\<n>\AppContainerNamedObjects\<pkg_sid>\`，看不到 global 对象
+3. **Capability 白名单** —— 默认几乎啥都做不了；显式带 `internetClient` 才有网、带 `documentsLibrary` 才能读用户 Documents
+
+**关键 API**：`CreateAppContainerProfile` / `DeriveAppContainerSidFromAppContainerName` / `CreateWellKnownSid(WinCapability*)` / `SECURITY_CAPABILITIES` / `PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES`。
+
+#### M2 越狱测试实测结果（对比 M1）
+
+| # | 越狱动作 | M1 结果 | **M2 结果** | 更早/更硬的原因 |
+|---|---|---|---|---|
+| 1 | 写用户桌面文件 | BLOCKED gle=5 | **BLOCKED gle=5** | 相同 |
+| 2 | 起子进程 | BLOCKED gle=367 | **BLOCKED gle=367** | 相同 |
+| 3 | RWX 内存 | BLOCKED gle=1655 | **BLOCKED gle=1655** | 相同 |
+| 4 | 加载非签名 DLL | BLOCKED gle=577 (mitigation 层) | **BLOCKED gle=5 (NTFS 层)** ⭐ | Package SID 对文件无读权限，更早一层拦下 |
+| 5 | 读剪贴板 | GetClipboardData 拦 | **连 OpenClipboard 都拦** ⭐ | 主体不属于 winsta 剪贴板 ACL |
+| 6 | 打开 broker 造的 global mutex | **SUCCESS**（共享 BaseNamedObjects 能看到 broker 的对象） | **BLOCKED gle=2** ⭐⭐ | **broker 明明造了，target 看不到**——独立命名空间 |
+| 7 | TCP loopback 127.0.0.1:1 | SUCCESS（M1 完全不禁网） | **SUCCESS (10061)** ⚠️ | **AppContainer 单靠自身不禁网**——需 broker 主动往 Firewall 写规则，见 M2.md § 九 |
+
+**gle=2 (FILE_NOT_FOUND)** 是 AppContainer 命名空间隔离的招牌——不是"拒绝访问"，而是"目标对象在你的命名空间里根本不存在"。
+
+**jailbreak-7 反直觉的实测结论**：M2 单独存在时**根本没禁网**。`AppContainerLoopback` 内核过滤器只拦入方向；出方向完全走 Windows Firewall 用户态规则表，而 `CreateAppContainerProfile` 只落地 Registry 不会自动写防火墙规则（UWP 通过 `Add-AppxPackage` 部署时框架才自动写）。生产级实现要 broker 程序化调 `INetFwPolicy2` 补齐规则——**这一步是 M2 加餐补丁做的事**（Chromium sandbox 同做法）。
+
+#### M2 关键坑（3 个亲踩记录）
+
+- **AppContainer + 手工 alt desktop 冲突** → M2 默认关掉 alt desktop（AppContainer 自带 UI 命名空间隔离）
+- **`BLOCK_NON_MICROSOFT_BINARIES` 干扰 winsock helper** → M2 关掉这项mitigation（AppContainer 已提供更早一层的拦截）
+- **AppContainer 不等于自动禁网** ⭐ → capability 只是防火墙规则的匹配标签，规则本身要 broker 主动写；见加餐补丁 `core/firewall.{h,cc}`
+
+详见 [`docs/notes/M2.md`](sandbox_demo/docs/notes/M2.md)（含 5 条金牌面试话术）。
+
+**运行**：`run_m2.bat` / `run_m2_net.bat`；或 `.\build_m0\Debug\m2_demo.exe [--net] [--strict N] [--no-il] [--desk] <target.exe>`。
+
+### ⏳ M3 及以后 — 见 Roadmap 表
 
 ---
 

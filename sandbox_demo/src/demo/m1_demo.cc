@@ -116,6 +116,13 @@ int wmain(int argc, wchar_t** argv) {
     LOG_INFO << L"M1 配置：strict=" << a.strict_level << L" IL=" << (a.use_il ? L"Low" : L"off")
              << L" desk=" << (a.use_desk ? L"iso" : L"off");
 
+    // ---- broker 提前建probe mutex（见 hello_target.cc::Test6 注释） ----
+    HANDLE probe_mutex = ::CreateMutexW(nullptr, FALSE, L"Global\\WEMEET_SANDBOX_PROBE_MUTEX");
+    if (!probe_mutex) {
+        LOG_WARN << L"probe mutex 创建失败(gle=" << ::GetLastError()
+                 << L")，jailbreak-6 结果可能失真";
+    }
+
     // ---------- 1) Job ----------
     JobManager job;
     JobPolicy job_policy{};

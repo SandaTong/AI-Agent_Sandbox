@@ -68,9 +68,16 @@ class MitigationAttrList {
     MitigationAttrList& operator=(MitigationAttrList&&) = delete;
 
     // 按 config 计算位图，一次性写进属性列表。可以重复调用（内部会重置）。
+    //
     // parent_process 传非 nullptr 时会额外插入 PROC_THREAD_ATTRIBUTE_PARENT_PROCESS
     // 属性（M3 之后会用到，M1 传 nullptr 即可）。
-    std::error_code Configure(const MitigationConfig& config, HANDLE parent_process = nullptr);
+    //
+    // sec_caps 传非 nullptr 时会插入 PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES
+    // 属性，把 target 绑到一个 AppContainer（M2 开始用）。sec_caps 指向的
+    // 内存由调用方保证在 CreateProcess 期间存活（AppContainer 对象通常就是
+    // storage）。
+    std::error_code Configure(const MitigationConfig& config, HANDLE parent_process = nullptr,
+                              const SECURITY_CAPABILITIES* sec_caps = nullptr);
 
     [[nodiscard]] LPPROC_THREAD_ATTRIBUTE_LIST ptr() const noexcept {
         return reinterpret_cast<LPPROC_THREAD_ATTRIBUTE_LIST>(const_cast<BYTE*>(buffer_.data()));
