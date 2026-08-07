@@ -280,7 +280,48 @@ M1 让 target 稳定起来一路踩了 4 个坑，每一个都是 Windows 沙箱
 
 **运行**：`run_m2.bat` / `run_m2_net.bat`；或 `.\build_m0\Debug\m2_demo.exe [--net] [--strict N] [--no-il] [--desk] <target.exe>`。
 
-### ⏳ M3 及以后 — 见 Roadmap 表
+### ✅ M3 — Broker/Target Named-Pipe IPC 骨架
+
+**沙箱从"单机护栏"进化到"工程化沙箱"的关键一步**。M0~M2 把target 关进笼子，笼子越严target 越什么都干不了——真实 renderer 的敏感操作必须**委托 broker 代劳**。M3 建立这条委托通道。
+
+```
+target（沙箱内，无权限）  --IPC 请求-->  broker（沙箱外，有权限）
+                                          ├ 策略检查（白名单）← 安全决策点
+                                          ├ 代劳 CreateFileW
+                                          └ DuplicateHandle 交还句柄
+target <--句柄值--  可直接 ReadFile 使用
+```
+
+三个技术支柱：
+
+1. **命名管道（消息模式）** — `CreateNamedPipeW(PIPE_TYPE_MESSAGE)` + SDDL 授权，一次 ReadFile 拿一整条消息
+2. **DuplicateHandle 跨进程句柄传递** — HANDLE 是进程私有的 handle table 索引，不能直接传数值，必须让内核在 target 的 handle table 里新建表项
+3. **边界安全** — 把 target 当恶意输入：magic/version 校验、payload 硬上限 64KB 防 DoS、路径白名单 + 拒 `..` 穿越、不透传 Win32 gle
+
+#### M3 实测（broker + target 交错日志）
+
+```
+[+] PipeServer: target 已连接
+  [ipc] Ping -> Pong OK                ← 双向通信闭环
+[+] PipeServer: 已代劳打开 C:\sandbox_share\hello.txt ... (dup=360)
+  [ipc] 打开 hello.txt -> OK (broker 代劳)，ReadFile 读到 30 字节   ← ⭐ 句柄传递成功
+[!] PipeServer: 拒绝打开越权路径: ...\etc\hosts
+  [ipc] 打开 hosts -> BLOCKED（broker 策略拒绝）                    ← ⭐ 白名单生效
+```
+
+`dup=360` + target 读到 30 字节（= hello.txt 大小）= **DuplicateHandle 跨进程句柄传递铁证**。
+
+#### M3 关键坑：命名管道 SDDL 的"双门"（复用 M1 坑 #4）
+
+Low IL target 连管道被 `ACCESS_DENIED (gle=5)`。根因是**双层门**：① 显式写 DACL 后无默认创建者授权，Low IL 普通 token 不匹配任何 ACE；② 管道默认继承创建者 Medium IL 的 mandatory label，Low IL `NoWriteUp` 被拒。修法：DACL 加目标主体授权 + SACL加 `(ML;;NW;;;LW)` 降低完整性门槛。**这正是 M1 桌面隔离时理解的"Windows 访问检查 = DACL AND Mandatory Label 双门"在管道对象上的再现**。
+
+带 `--ac` 时 broker 把管道 SDDL 追加 `(A;;GA;;;<PackageSid>)` 授权 AppContainer target——**M2 AppContainer 与 M3 IPC 的缝合点**。
+
+详见 [`docs/notes/M3.md`](sandbox_demo/docs/notes/M3.md)（4 条金牌面试话术）。
+
+**运行**（先`mkdir C:\sandbox_share` 且放一个 `hello.txt`）：`run_m3.bat`（纯 IPC）/ `run_m3_ac.bat`（IPC + AppContainer）；或 `.\build_m0\Debug\m3_demo.exe [--ac] [--strict N] [--no-il] <target.exe> --ipc`。
+
+### ⏳ M4 及以后 — 见 Roadmap 表
 
 ---
 

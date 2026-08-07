@@ -1,8 +1,8 @@
 # 项目记忆 — sandbox_demo (Windows 沙箱)
 
 ## 项目目标
-基于 Windows 安全机制实现一个进程沙箱。当前已推进到 M2(在 M1 基础上叠加 AppContainer + Capability 白名单 + Firewall 规则)。
-后续有 M3 路线图。
+基于 Windows 安全机制实现一个进程沙箱。当前已推进到 M3(在 M2 基础上叠加 Broker/Target IPC 命名管道通道)。
+M0~M3 路线图全部完成。
 
 ## M0 架构(双支柱 + 三步舞)
 - **支柱一 TokenManager**(`core/token_manager.cc`):`CreateRestrictedToken(DISABLE_MAX_PRIVILEGE)`
@@ -58,7 +58,27 @@
       AppContainer runtime 需加载非微软签名 DLL(如 winsock helper),强开会挂。
     3. AppContainer target 走私有命名空间,看不见 broker 的 global mutex(演示 namespace isolation)。
   - **与 M1 的本质区别**:M1 Restricted Token 是"你原来是谁 - 去掉权限";M2 LowBox 是"换成新身份(Package SID),完全不同访问检查路径,默认拒绝,声明什么才能用什么"。
-- M3: Broker/Target IPC(handle 白名单 PROC_THREAD_ATTRIBUTE_HANDLE_LIST)。
+- M3: ~~Broker/Target IPC(handle 白名单 PROC_THREAD_ATTRIBUTE_HANDLE_LIST)。~~ 已完成。
+  - 新增 `core/ipc_message.h`:IPC 消息协议。定长 MsgHeader(magic/version/type/payload_size)+
+    变长 payload。`#pragma pack(4)` 保证跨进程二进制稳定。payload 硬上限 64KB(防 DoS)。
+    ValidateHeader 固化"不信任对端"铁律。消息类型:Ping/Pong、OpenFile 请求/响应。
+  - 新增 `core/pipe_server.{h,cc}`:Broker 侧命名管道服务端。
+    `Create(package_sid_sddl)`:用 SDDL 构造 SD,DACL 授权 SY/BA/WD(+ 可选 Package SID),
+    SACL 放 mandatory label 降到 Low(让 Low IL target 能过完整性检查)。
+    `WaitForClient`(ConnectNamedPipe 阻塞)→ `ServeOneRequest`(收消息→校验→分发)。
+    `HandleOpenFile`:路径白名单(前缀 `C:\sandbox_share\` + 拒 `..` 穿越)+ broker 代劳 CreateFileW +
+    **DuplicateHandle** 把句柄复制进 target handle table(关键:HANDLE 进程私有,必须内核复制)。
+  - 新增 `core/pipe_client.{h,cc}`:Target 侧客户端,CreateFileW 连管道 + 收发消息。
+  - `demo/m3_demo.cc`:broker 建管道 → launch target(带 --ipc)→ WaitForClient → 循环 ServeOneRequest。
+    `--ac` 叠加 AppContainer 并把管道 SD 授权 Package SID。冒烟:target 读 hello.txt 成功,读 hosts 被拒。
+  - **M3 核心价值**:M0~M2 把 target 关进笼子(越严越什么都干不了),M3 给 target 一条"委托 broker 代劳"
+    的安全通道。broker 收到的每条消息都当恶意输入处理(校验头/边界/白名单)。
+  - **M3 踩坑/要点**:
+    1. AppContainer target 默认对 broker 管道无权限 → 管道 SD 必须显式授权 Package SID。
+    2. Low IL target 连 Medium IL 管道会被 NoWriteUp 一票否决 → SACL 把管道 label 降到 Low。
+    3. HANDLE 是进程私有 handle table 索引,不能直接传数值 → 必须用 DuplicateHandle 让内核在 target 里建新句柄。
+    4. demo 的 SD 用 Everyone(WD) 图省事,生产应精确到目标 user SID/Package SID(最小授权)。
+    5. 消息协议用 PIPE_TYPE_MESSAGE,内核维护消息边界,省粘包处理。
 
 ## 技术约定
 - 使用 `ScopedHandle` 做 HANDLE 的 RAII 管理,避免句柄泄漏。

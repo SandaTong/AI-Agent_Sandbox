@@ -23,6 +23,8 @@
 #include <io.h>     // _setmode / _fileno
 #include <string>   // std::wstring（jailbreak-4拼 DLL 路径用）
 
+#include "core/pipe_client.h"  // 【M3】target 侧 IPC client
+
 #pragma comment(lib, "ws2_32.lib")
 
 namespace {
@@ -280,9 +282,78 @@ BOOL WINAPI CtrlHandler(DWORD type) {
     return FALSE;
 }
 
+// -----------------------------------------------------------------------------
+// 【M3】IPC 客户端演示：target 在沙箱里几乎什么都干不了，通过 IPC 委托 broker
+// 代劳。这里演示三步：
+//   1. Ping —— 连通性冒烟
+//   2. 请 broker 打开白名单目录里的文件 —— 应成功拿到句柄并能读
+//   3. 请 broker 打开白名单外的文件 —— 应被 broker 策略拒绝 (kDenied)
+//
+// 关键看点：即便 target 自己 CreateFileW 打不开的文件（Low IL / AppContainer
+// 无权限），只要 broker 有权且策略允许，target 就能通过 IPC + DuplicateHandle
+// 拿到一个可用的文件句柄——这就是"broker 代劳"的核心价值。
+// -----------------------------------------------------------------------------
+void RunIpcClientDemo() {
+    using namespace sandbox;
+    std::wprintf(L"\n[target] === IPC 客户端演示（M3）===\n");
+
+    PipeClient client;
+    if (auto ec = client.Connect(5000)) {
+        std::wprintf(L"  [ipc] 连接 broker 失败: gle=%d（若为 5=ACCESS_DENIED 说明未授权本 SID）\n",
+                     ec.value());
+        std::wprintf(L"[target] === IPC 演示结束（未连上）===\n\n");
+        return;
+    }
+    std::wprintf(L"  [ipc] 已连上 broker 管道\n");
+
+    // 1) Ping
+    if (auto ec = client.Ping()) {
+        std::wprintf(L"  [ipc] Ping 失败: gle=%d\n", ec.value());
+    } else {
+        std::wprintf(L"  [ipc] Ping -> Pong OK\n");
+    }
+
+    // 2) 请 broker 打开白名单内的文件
+    auto try_open = [&client](const wchar_t* path) {
+        HANDLE h = nullptr;
+        ipc::ResultCode rc = ipc::ResultCode::kInternalError;
+        auto ec = client.RequestOpenFile(path, h, rc);
+        if (ec) {
+            std::wprintf(L"  [ipc] 请求打开 %ls 传输失败: gle=%d\n", path, ec.value());
+            return;
+        }
+        if (rc == ipc::ResultCode::kOk && h) {
+            // 拿到 broker DuplicateHandle 过来的句柄，直接读前几个字节验证可用。
+            char peek[64] = {};
+            DWORD got = 0;
+            BOOL ok = ::ReadFile(h, peek, sizeof(peek) - 1, &got, nullptr);
+            std::wprintf(L"  [ipc] 打开 %ls -> OK (broker 代劳)，ReadFile %ls，读到 %lu 字节\n",
+                         path, ok ? L"成功" : L"失败", got);
+            ::CloseHandle(h);
+        } else if (rc == ipc::ResultCode::kDenied) {
+            std::wprintf(L"  [ipc] 打开 %ls -> BLOCKED（broker 策略拒绝，越权路径）\n", path);
+        } else {
+            std::wprintf(L"  [ipc] 打开 %ls -> 失败 (result=%u)\n", path,
+                         static_cast<unsigned>(rc));
+        }
+    };
+
+    try_open(L"C:\\sandbox_share\\hello.txt");                // 白名单内：应 OK
+    try_open(L"C:\\Windows\\System32\\drivers\\etc\\hosts");  // 白名单外：应 BLOCKED
+
+    std::wprintf(L"[target] === IPC 演示结束 ===\n\n");
+}
+
 }  // namespace
 
-int wmain() {
+int wmain(int argc, wchar_t** argv) {
+    // 解析参数：带 --ipc 时在越狱测试后跑一段 M3 IPC 客户端演示。
+    bool run_ipc = false;
+    for (int i = 1; i < argc; ++i) {
+        if (wcscmp(argv[i], L"--ipc") == 0)
+            run_ipc = true;
+    }
+
     // ---- stdio初始化 ----
     // 只有当 stdout 真的是"控制台屏幕缓冲区"（file type == FILE_TYPE_CHAR
     // 且 GetConsoleMode 成功）时，才把它切到 _O_U16TEXT。否则跳过：
@@ -327,6 +398,11 @@ int wmain() {
     Test6_OpenGlobalNamedObject();
     Test7_TryNetworkConnect();
     std::wprintf(L"[target] === 越狱测试结束 ===\n\n");
+
+    // 【M3】可选：跑 IPC 客户端演示（委托 broker 代劳打开文件）。
+    if (run_ipc) {
+        RunIpcClientDemo();
+    }
 
     std::wprintf(L"[target] 每 2 秒发一次心跳。按 Ctrl+C 或关闭窗口即可退出。\n");
     std::fflush(stdout);

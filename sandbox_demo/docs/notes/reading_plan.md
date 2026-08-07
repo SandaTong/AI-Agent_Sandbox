@@ -17,17 +17,37 @@
 | Day | Milestone | 📗 Richter 优先章节 | 📕 潘书优先章节 | 每日投入 |
 |---|---|---|---|---|
 | **D1** ✅ | M0 基础闭环 | Ch 3 内核对象 · Ch 4 进程 · Ch 5 作业 | Ch 2 §2.5.1 对象管理 · Ch 3 §3.1~3.4 进程线程数据结构 | 已完成 |
-| **D2** | M1（1/2）Low IL | Ch 3 内核对象 复习 · Ch 4 进程 中的安全部分 | **Ch 2 §2.5.4 安全性管理**（重中之重） | 2 h |
-| **D3** | M1（2/2）Mitigation Policy + Alt Desktop | Ch 4 进程（Mitigation 段落） | Ch 3 §3.4.3 进程创建过程 | 1.5 h |
-| **D4-5** | M2 AppContainer / LowBox | Ch 3 内核对象（名字空间部分）| Ch 2 §2.5.1 对象管理器 精读 | 各 1.5 h |
-| **D6** | M3 Broker/Target + Named-Pipe IPC | **Ch 8 用户模式同步** · **Ch 9 内核对象同步** | **Ch 8 §8.2 LPC · §8.3 命名管道** | 2 h |
-| **D7-8** | M4 注入 + Hook | **Ch 22 DLL 注入和 API 拦截**（这一章就是 W4） · Ch 19-20 DLL | Ch 4 §4.3 进程内存管理 · Ch 3 §3.4.1 句柄表 | 各 2 h |
+| **D2** ✅ | M1（1/2）Low IL | Ch 3 内核对象 复习 · Ch 4 进程 中的安全部分 | **Ch 2 §2.5.4 安全性管理**（重中之重） | 已完成 |
+| **D3** ✅ | M1（2/2）Mitigation Policy + Alt Desktop | Ch 4 进程（Mitigation 段落） | Ch 3 §3.4.3 进程创建过程 | 已完成 |
+| **D4-5** ✅ | M2 AppContainer / LowBox | Ch 3 内核对象（名字空间部分）| Ch 2 §2.5.1 对象管理器 精读 | 已完成 |
+| **D6** ✅ | M3 Broker/Target + Named-Pipe IPC | **Ch 8 用户模式同步** · **Ch 9 内核对象同步** | **Ch 8 §8.2 LPC · §8.3 命名管道** | 已完成 |
+| **D7-8** ⏳ | M4 注入 + Hook | **Ch 22 DLL 注入和 API 拦截**（这一章就是 W4） · Ch 19-20 DLL | Ch 4 §4.3 进程内存管理 · Ch 3 §3.4.1 句柄表 | 各 2 h |
 | **D9** | M5 反注入 | Ch 22 后半（防注入部分） · Ch 20 §DLL 通知 | — | 1.5 h |
 | **D10-12** | M6 WFP 网络管控 | —（Richter 未覆盖 WFP，看官方文档） | **Ch 9 §9.1 网络体系结构**（TDI/NDIS/WFP 对比） | 各 2 h |
 | **D13** | M7 DNS 域名 | — | — | 1 h |
 | **D14-15** | M8 用户态文件 Broker | Ch 10 I/O（同步 vs 异步） · Ch 17 内存映射文件 | **Ch 6 I/O 系统** · Ch 7 §7.4 NTFS | 各 1.5 h |
 | **D16-18** | M9 内核 Minifilter | 已跨界到内核态，Richter 不覆盖 | **Ch 6 §6.5 设备驱动 · §6.6 I/O 处理** · Ch 7 §7.4.3 文件系统 I/O 过滤 | 各 3 h |
 | **D19-20** | M10-11 测试 + 打包 | — | — | 复盘 |
+
+---
+
+## 📍 当前进度（截至 M3）
+
+```
+Day 1     M0 ✅  Job + Restricted Token
+Day 2-3   M1 ✅  Low IL + Mitigation + Alt Desktop（踩 4 个 0xC0000142坑）
+Day 4-5   M2 ✅  AppContainer + LowBox + INetFwPolicy2加餐（踩 5 个坑）
+Day 6     M3 ✅  Broker/Target Named-Pipe IPC（DuplicateHandle + 管道 SDDL 双门坑）  ← 你在这里
+Day 7-8   M4 ⏳  注入 + API Hook（W4 核心）        ← 下一站
+Day 9     M5 ⏳  反注入 + 运行时检测
+Day 10-12 M6 ⏳  WFP 用户态网络管控（还M2 § 九留的"loopback 拦不下"的债）
+Day 13    M7 ⏳  DNS 域名维度
+Day 14-15 M8 ⏳  用户态文件 Broker（复用 M3 的 IPC + DuplicateHandle 骨架）
+Day 16-18 M9 ⏳  内核 Minifilter 驱动（W2 皇冠）
+Day 19-20 M10-11 ⏳ 测试 + 打包
+```
+
+**已完成 4 个 milestone（M0~M3），沙箱已具备"关得死 + 能受控干活"的完整闭环**。M3 的 IPC + DuplicateHandle 骨架会在 M8 用户态文件 Broker 里直接复用。下一站 M4 是注入 + Hook，对应 JD 的 W4。
 
 ---
 
@@ -61,7 +81,7 @@
 
 ---
 
-### ⏳ M1 — Integrity Level + Mitigation Policy + Alternate Desktop
+### ✅ M1（已完成）— Integrity Level + Mitigation Policy + Alternate Desktop
 
 **代码将用到**：`SetTokenInformation(TokenIntegrityLevel)`、Mandatory Label SID、`STARTUPINFOEX`、`UpdateProcThreadAttribute`、`PROC_THREAD_ATTRIBUTE_MITIGATION_POLICY`、`CreateWindowStation`、`CreateDesktop`
 
@@ -91,7 +111,7 @@ Mandatory Label 段落尤其关键——你会看到 `SECURITY_MANDATORY_LOW_RID
 
 ---
 
-### ⏳ M2 — AppContainer / LowBox Token
+### ✅ M2（已完成）— AppContainer / LowBox Token
 
 **代码将用到**：`CreateAppContainerProfile`、`DeriveAppContainerSidFromAppContainerName`、`NtCreateLowBoxToken`（未文档化）、Capability SID、`SECURITY_CAPABILITIES` 结构
 
@@ -116,7 +136,7 @@ Mandatory Label 段落尤其关键——你会看到 `SECURITY_MANDATORY_LOW_RID
 
 ---
 
-### ⏳ M3 — Broker/Target 双进程 + Named-Pipe IPC
+### ✅ M3（已完成）— Broker/Target 双进程 + Named-Pipe IPC
 
 **代码将用到**：`CreateNamedPipe` / `ConnectNamedPipe`、异步 I/O（Overlapped）、`WriteFileEx` / `ReadFileEx`、消息帧协议、Broker/Target 生命周期管理
 
@@ -293,6 +313,7 @@ Mandatory Label 段落尤其关键——你会看到 `SECURITY_MANDATORY_LOW_RID
 - `docs/notes/M0.md` — 已写，含 3 个硬伤修复的完整叙述
 - `docs/notes/M1.md` — M1 完整笔记 + 7 章 + 4 个 0xC0000142 坑 + 4 条金牌话术
 - `docs/notes/M2.md` — M2 完整笔记 + 12 章 + Firewall 加餐 + 6 条金牌话术
+- `docs/notes/M3.md` — M3 完整笔记 + Broker/Target IPC + DuplicateHandle + 管道 SDDL 双门坑 + 4 条金牌话术
 - **`docs/notes/kernel_objects_101.md`** ⭐ — **横切基础**：Object Manager / OBJECT_TYPE / HANDLE 表 / SeAccessCheck / KILL_ON_JOB_CLOSE 回调 / AppContainer 命名空间前缀劫持。所有 milestone 遇到"内核里到底怎么实现的"这类问题先来这里查
 - **`docs/notes/tools_cheatsheet.md`** ⭐ — **工具速查表**：Process Explorer / WinObj / ProcMon / dumpbin / WinDbg / wf.msc 等所有沙箱开发调试常用工具，按用途分类 + 每个工具"什么时候用它 + 对应我们代码哪个场景"
 - `README.md` — 工程总览 + JD 关键词映射
