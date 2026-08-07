@@ -71,3 +71,17 @@
 - 访问检查:线程访问对象时,SRM 用 token 的 SID 比对对象 SD 中的 DACL(ACE),叠加 IL 检查后裁决。
 - primary token 绑定进程;子进程默认继承父 token;线程可 impersonation 临时换用 client token。
 - token 管"特权能力",Job 管"资源/生命周期",两者互补缺一不可。
+
+## 用户研究方向(跨会话)
+- 用户在研究 Windows 内核(ntoskrnl.exe)内部,想用 WinDbg 深入了解。
+- 沙箱属于"用户态构造、内核态执行"——代码在用户态调 Win32 API,约束由内核 SRM/Job/EPROCESS/AppContainer 强制执行。
+- 用户可能后续会用 WinDbg 验证沙箱机制(EPROCESS 字段、token 结构、handle table)。
+- WinDbg 探索建议:本地内核调试入门(配符号 srv*c:\symbols*msdl)→ 双机调试动态跟踪;
+  学习路径:进程线程结构体 → 对象管理器 → 系统调用分发 → 内存管理 → 调度器。
+- **已搭好的环境(2026-08-07)**:
+  - 用户机器 Secure Boot 开启,`bcdedit /debug on` 被拒 → 改用 **LiveKD** 方案。
+  - LiveKD 装在 `C:\Tools\LiveKD\livekd64.exe`(Sysinternals)。
+  - 经典版 WinDbg 在 `C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\windbg.exe`,Preview 是 `WinDbgX.exe`。
+  - `_NT_SYMBOL_PATH = srv*c:\symbols*https://msdl.microsoft.com/download/symbols`(用户级),`C:\symbols` 已建。
+  - 启动方式:把 WinDbg 路径加进 PATH + 设好 _NT_SYMBOL_PATH,然后 `livekd64.exe -w`。
+  - LiveKD 与本地内核调试等价(都只读),够用于探索结构体/反汇编;要动态断点才需双机调试+关 Secure Boot。
