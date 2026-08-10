@@ -321,7 +321,35 @@ Low IL target 连管道被 `ACCESS_DENIED (gle=5)`。根因是**双层门**：�
 
 **运行**（先`mkdir C:\sandbox_share` 且放一个 `hello.txt`）：`run_m3.bat`（纯 IPC）/ `run_m3_ac.bat`（IPC + AppContainer）；或 `.\build_m0\Debug\m3_demo.exe [--ac] [--strict N] [--no-il] <target.exe> --ipc`。
 
-### ⏳ M4 及以后 — 见 Roadmap 表
+### ✅ M4 — DLL 注入 + API Hook（精简版骨架）
+
+**从"沙箱设计者"切到"往target 植入拦截垫片"视角**。broker 主动往 target 注入一个 DLL，DLL 在 target 内部用 MinHook 钩住敏感 API（CreateFileW），把调用重定向到拦截逻辑。**注入在沙箱里不是攻击，是 Chromium sandbox 式的 interception——target 无感知地被拦截转发**。这是 M3 IPC 的自然延伸（M3 target 主动请代劳，M4 被hook 后自动交出调用）。
+
+远程线程注入四件套：
+
+1. `VirtualAllocEx` 在 target 地址空间分配内存
+2. `WriteProcessMemory` 写入 DLL 路径字符串
+3. `GetProcAddress(kernel32, "LoadLibraryW")` —— kernel32 同 session 基址一致，broker 取的地址在 target 有效
+4. `CreateRemoteThread`(入口=LoadLibraryW, 参数=路径地址) —— 借 target 线程加载 DLL
+
+Hook 用 **MinHook**（vendored 到 `src/third_party/minhook`）做 Inline Hook。
+
+#### M4 实测
+
+- **注入成功硬证据**：`(Get-Process hello_target).Modules` 里出现 `sandbox_hook.dll`
+- **Hook 生效硬证据**：钩子拦到 jailbreak-1 的真实路径 `[hook] CreateFileW 拦截到: C:\Users\<你>\Desktop\sandbox_jailbreak.txt`
+
+#### M4 关键坑：注入的 hook 垫片"继承 target 权限，不提权"
+
+Low IL target 下，注入成功、hook 装上了，但钩子里写文件日志到Medium IL 目录**写不出**（ACCESS_DENIED）。根因：**钩子改内存/拦函数不受 IL 限制，但钩子里发起的系统调用仍以 target 身份和 IL 走完整访问检查**。想让被 hook 的操作越权，只能转发给权限更高的 broker 代劳——**这反过来印证了沙箱 IPC 的必要性**。日志因此改用 `OutputDebugStringW`（不受文件系统 IL 限制，DebugView 可看）。
+
+另一个坑：**强 mitigation 与运行时注入天然冲突**（`PROHIBIT_DYNAMIC_CODE` 拦 Inline Hook 改内存、`BLOCK_NON_MICROSOFT_BINARIES` 拦加载未签名 hook dll）——精简版为演示注入骨架关掉了这两项。
+
+详见 [`docs/notes/M4.md`](sandbox_demo/docs/notes/M4.md)（5 条金牌面试话术）。
+
+**运行**：`run_m4.bat`（Low IL，用 DebugView 看 hook 日志）/ `run_m4_noil.bat`（Medium IL，文件日志可落盘）；或 `.\build_m0\Debug\m4_demo.exe [--strict N] [--no-il] <target.exe>`。
+
+### ⏳ M5 及以后 — 见 Roadmap 表
 
 ---
 

@@ -46,6 +46,11 @@ struct LaunchOptions {
     // 【M1】可选：如果给了 attr_list，target 会走 STARTUPINFOEX 加载 Mitigation。
     // nullptr 表示不装 Mitigation Policy。
     const MitigationAttrList* attr_list = nullptr;
+
+    // 【M4】可选：true 时 Launch 完成后 target 仍处于挂起状态（不ResumeThread），
+    // 由调用方在做完注入等操作后自己 ResumeThread(out.main_thread)。默认 false，
+    // 保持 M0~M3 的行为（Launch 内部自动 resume）。
+    bool start_suspended = false;
 };
 
 struct LaunchResult {

@@ -96,10 +96,14 @@ std::error_code ProcessLauncher::Launch(const LaunchOptions& opts, LaunchResult&
     }
 
     // ---- 第 3 步：Resume 主线程；target 此刻真正开始执行 ----
-    if (::ResumeThread(thread.get()) == static_cast<DWORD>(-1)) {
-        auto ec = LastError();
-        ::TerminateProcess(proc.get(), 1);
-        return ec;
+    // 【M4】start_suspended 时跳过 resume——调用方要在 target 还挂起时先做
+    // 注入等操作，之后自己 ResumeThread(out.main_thread)。
+    if (!opts.start_suspended) {
+        if (::ResumeThread(thread.get()) == static_cast<DWORD>(-1)) {
+            auto ec = LastError();
+            ::TerminateProcess(proc.get(), 1);
+            return ec;
+        }
     }
 
     LOG_INFO << L"ProcessLauncher: pid=" << pi.dwProcessId << L" tid=" << pi.dwThreadId

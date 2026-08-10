@@ -12,7 +12,7 @@
 #   M9   内核 Minifilter 驱动
 # =============================================================================
 cmake_minimum_required(VERSION 3.20)
-project(sandbox_demo LANGUAGES CXX)
+project(sandbox_demo LANGUAGES C CXX)
 
 # ----- 全局 C++ 设置 ----------------------------------------------------------
 set(CMAKE_CXX_STANDARD 17)
@@ -40,17 +40,46 @@ if(MSVC)
     )
 endif()
 
+# ----- 第三方：MinHook（vendored 到 src/third_party/minhook，M4 API Hook 用）--
+# 不用 add_subdirectory —— 它自带的 CMakeLists 有 install/export/config 逻辑，
+# 对我们这个纯本地 demo 是噪声；而且我们全局开了 /W4 /permissive-，MinHook
+# 的 C 代码会报一堆警告。所以这里自己定义一个干净的静态库 target，只编需要
+# 的几个 .c，并单独关掉它的警告（第三方代码不该被我们的严格开关卡住）。
+set(MINHOOK_DIR ${CMAKE_SOURCE_DIR}/src/third_party/minhook)
+if(CMAKE_SIZEOF_VOID_P EQUAL 8)
+    set(MINHOOK_HDE ${MINHOOK_DIR}/src/hde/hde64.c)
+else()
+    set(MINHOOK_HDE ${MINHOOK_DIR}/src/hde/hde32.c)
+endif()
+add_library(minhook STATIC
+    ${MINHOOK_DIR}/src/buffer.c
+    ${MINHOOK_DIR}/src/hook.c
+    ${MINHOOK_DIR}/src/trampoline.c
+    ${MINHOOK_HDE}
+)
+target_include_directories(minhook PUBLIC ${MINHOOK_DIR}/include)
+target_include_directories(minhook PRIVATE ${MINHOOK_DIR}/src ${MINHOOK_DIR}/src/hde)
+if(MSVC)
+    # 第三方 C 代码：关掉我们的严格警告，避免 /W4 /permissive- 卡编译。
+    target_compile_options(minhook PRIVATE /W0)
+endif()
+# minhook 也用静态 CRT，与 sandbox_hook.dll（/MTd）一致，否则 CRT 链接冲突。
+set_property(TARGET minhook PROPERTY
+    MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+set_target_properties(minhook PROPERTIES FOLDER "third_party")
+
 # -----静态库 sandbox_core：common + core------------------------------------
 add_library(sandbox_core STATIC
     src/core/job_manager.cc
     src/core/token_manager.cc
     src/core/process_launcher.cc
     src/core/mitigation.cc
- src/core/desktop_iso.cc
+    src/core/desktop_iso.cc
     src/core/appcontainer.cc
     src/core/firewall.cc
     src/core/pipe_server.cc
     src/core/pipe_client.cc
+    src/core/injector.cc
 )
 target_include_directories(sandbox_core PUBLIC src)
 target_link_libraries(sandbox_core PUBLIC
@@ -75,6 +104,21 @@ target_link_libraries(m2_demo PRIVATE sandbox_core)
 # ----- M3 演示程序（Broker/Target Named-Pipe IPC 骨架） ----------------------
 add_executable(m3_demo src/demo/m3_demo.cc)
 target_link_libraries(m3_demo PRIVATE sandbox_core)
+
+# ----- M4 演示程序（DLL注入 + API Hook 骨架） -------------------------------
+add_executable(m4_demo src/demo/m4_demo.cc)
+target_link_libraries(m4_demo PRIVATE sandbox_core)
+
+# ----- sandbox_hook.dll：被注入进 target 的拦截垫片（MinHook 钩 CreateFileW）--
+# 静态链接 CRT，保持和 hello_target 一致（避免注入后依赖非签名 debug CRT）。
+# 链接 minhook静态库（vendored）。
+add_library(sandbox_hook SHARED src/demo/sandbox_hook.cc)
+target_link_libraries(sandbox_hook PRIVATE minhook user32.lib)
+set_target_properties(sandbox_hook PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/$<CONFIG>"
+    LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/$<CONFIG>")
+set_property(TARGET sandbox_hook PROPERTY
+    MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 
 # ----- 一个用来做冒烟对比的极简 target ---------------------------------------
 # 直接双击 -> 看到"基线"行为（Medium IL，无 Job，特权齐全）；
@@ -115,5 +159,7 @@ set_target_properties(m0_demo       PROPERTIES FOLDER "demo")
 set_target_properties(m1_demo       PROPERTIES FOLDER "demo")
 set_target_properties(m2_demo   PROPERTIES FOLDER "demo")
 set_target_properties(m3_demo       PROPERTIES FOLDER "demo")
+set_target_properties(m4_demo       PROPERTIES FOLDER "demo")
+set_target_properties(sandbox_hook  PROPERTIES FOLDER "demo")
 set_target_properties(hello_target  PROPERTIES FOLDER "demo")
 set_target_properties(unsigned_probe PROPERTIES FOLDER "demo")

@@ -1,8 +1,8 @@
 # 项目记忆 — sandbox_demo (Windows 沙箱)
 
 ## 项目目标
-基于 Windows 安全机制实现一个进程沙箱。当前已推进到 M3(在 M2 基础上叠加 Broker/Target IPC 命名管道通道)。
-M0~M3 路线图全部完成。
+基于 Windows 安全机制实现一个进程沙箱。当前已推进到 M4(在 M3 基础上叠加 DLL 注入 + API Hook 运行时拦截层)。
+M0~M4 路线图全部完成。
 
 ## M0 架构(双支柱 + 三步舞)
 - **支柱一 TokenManager**(`core/token_manager.cc`):`CreateRestrictedToken(DISABLE_MAX_PRIVILEGE)`
@@ -79,6 +79,26 @@ M0~M3 路线图全部完成。
     3. HANDLE 是进程私有 handle table 索引,不能直接传数值 → 必须用 DuplicateHandle 让内核在 target 里建新句柄。
     4. demo 的 SD 用 Everyone(WD) 图省事,生产应精确到目标 user SID/Package SID(最小授权)。
     5. 消息协议用 PIPE_TYPE_MESSAGE,内核维护消息边界,省粘包处理。
+- M4: ~~DLL 注入 + API Hook 运行时拦截层。~~ 已完成。
+  - 新增 `core/injector.{h,cc}`:`Injector::InjectDll` 远程线程注入四件套:
+    VirtualAllocEx(在 target 分配内存)→ WriteProcessMemory(写 DLL 路径)→
+    GetProcAddress(kernel32,LoadLibraryW)(拿地址,kernel32 同 session 基址相同)→
+    CreateRemoteThread(在 target 起线程入口=LoadLibraryW 参数=路径)→ 等退出码。
+  - 新增 `third_party/minhook/`:MinHook 库(第三方,inline hook)。
+  - 新增 `demo/sandbox_hook.cc` → `sandbox_hook.dll`:被注入的"拦截垫片"DLL。
+    DllMain attach 时用 MinHook 钩 `kernel32!CreateFileW` → `HookedCreateFileW`。
+    钩子里:OutputDebugStringW + 追加写 `%TEMP%\sandbox_hook_log.txt`(必须用 g_orig_CreateFileW 防递归)。
+  - `demo/m4_demo.cc`:launch target(CREATE_SUSPENDED)→ InjectDll → ResumeThread。
+    关键时序:hook 必须在 target 跑用户代码前装好(start_suspended=true)。
+  - **M4 踩坑/要点**:
+    1. AppContainer + 强 mitigation(PROHIBIT_DYNAMIC_CODE / BLOCK_NON_MICROSOFT_BINARIES)会拦注入 → M4 精简版用普通 Low IL target,关掉这两项 mitigation。
+       **本质:强 mitigation 和"自己注入 hook"冲突** —— 生产要么 hook dll 签名,要么用预置 hook 机制。
+    2. hook dll 继承 target 的权限,不会提权:钩子逻辑在 target 内存里不受 IL 限制,但钩子里做的 IO 仍受 target 自身沙箱权限约束。
+    3. 日志路径用 %TEMP% 而非 C:\sandbox_share —— Low IL target 对 Medium IL 目录无写权限,但自己的 %TEMP%(AppData\Local\Temp\Low)一定有写权限。
+    4. 钩子里写日志必须用 g_orig_CreateFileW(trampoline),否则递归触发自己 hook 无限递归。
+    5. kernel32.dll 在同一 session 所有进程里加载基址相同 → broker 取的 LoadLibraryW 地址在 target 同样有效(注入成立前提)。
+  - **M4 在沙箱里的位置**:M0~M2 是"被动配置内核机制"(内核强制执行),M3 是"target 主动请 broker 代劳",M4 是"broker 主动植入 hook 让 target 的调用被无感知拦截转发"——和 Chromium sandbox 的 "interceptions" 机制对应。
+  - **M4 vs M0~M3 维度区别**:M0~M3 是"内核态执行"(约束靠 SRM/Job/EPROCESS);M4 是"用户态拦截"(hook 改函数头几字节,纯用户态)。M4 更早、更细粒度,但可被绕(改内存保护/直接 syscall)。
 
 ## 技术约定
 - 使用 `ScopedHandle` 做 HANDLE 的 RAII 管理,避免句柄泄漏。
