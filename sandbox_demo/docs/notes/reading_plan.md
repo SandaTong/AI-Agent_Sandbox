@@ -22,7 +22,7 @@
 | **D4-5** ✅ | M2 AppContainer / LowBox | Ch 3 内核对象（名字空间部分）| Ch 2 §2.5.1 对象管理器 精读 | 已完成 |
 | **D6** ✅ | M3 Broker/Target + Named-Pipe IPC | **Ch 8 用户模式同步** · **Ch 9 内核对象同步** | **Ch 8 §8.2 LPC · §8.3 命名管道** | 已完成 |
 | **D7-8** ✅ | M4 注入 + Hook | **Ch 22 DLL 注入和 API 拦截**（这一章就是 W4） · Ch 19-20 DLL | Ch 4 §4.3 进程内存管理 · Ch 3 §3.4.1 句柄表 | 已完成 |
-| **D9** | M5 反注入 | Ch 22 后半（防注入部分） · Ch 20 §DLL 通知 | — | 1.5 h |
+| **D9** ✅ | M5 反注入 | Ch 22 后半（防注入部分） · Ch 20 §DLL 通知 | — | 已完成 |
 | **D10-12** | M6 WFP 网络管控 | —（Richter 未覆盖 WFP，看官方文档） | **Ch 9 §9.1 网络体系结构**（TDI/NDIS/WFP 对比） | 各 2 h |
 | **D13** | M7 DNS 域名 | — | — | 1 h |
 | **D14-15** | M8 用户态文件 Broker | Ch 10 I/O（同步 vs 异步） · Ch 17 内存映射文件 | **Ch 6 I/O 系统** · Ch 7 §7.4 NTFS | 各 1.5 h |
@@ -31,23 +31,23 @@
 
 ---
 
-## 📍 当前进度（截至 M4）
+## 📍 当前进度（截至 M5）
 
 ```
 Day 1     M0 ✅  Job + Restricted Token
 Day 2-3   M1 ✅  Low IL + Mitigation + Alt Desktop（踩 4 个 0xC0000142坑）
 Day 4-5   M2 ✅  AppContainer + LowBox + INetFwPolicy2加餐（踩 5 个坑）
 Day 6     M3 ✅  Broker/Target Named-Pipe IPC（DuplicateHandle + 管道 SDDL 双门坑）
-Day 7-8   M4 ✅  DLL 注入 + API Hook（MinHook；注入垫片继承 target 权限不提权坑）  ← 你在这里
-Day 9     M5 ⏳  反注入 + 运行时检测          ← 下一站
-Day 10-12 M6 ⏳  WFP 用户态网络管控（还M2 § 九留的"loopback 拦不下"的债）
+Day 7-8   M4 ✅  DLL 注入 + API Hook（MinHook；注入垫片继承 target 权限不提权坑）
+Day 9     M5 ✅  反注入 + 运行时检测（内核 mitigation + 用户态自检；用 M4 injector 攻防对照）  ← 你在这里
+Day 10-12 M6 ⏳  WFP 用户态网络管控（还M2 § 九留的"loopback 拦不下"的债）  ← 下一站
 Day 13    M7 ⏳  DNS 域名维度
 Day 14-15 M8 ⏳  用户态文件 Broker（复用 M3 的 IPC + DuplicateHandle 骨架）
 Day 16-18 M9 ⏳  内核 Minifilter 驱动（W2 皇冠）
 Day 19-20 M10-11 ⏳ 测试 + 打包
 ```
 
-**已完成 5 个 milestone（M0~M4）**。M4 的注入 + Hook 是"攻"的一面，M5 反注入正好是它的对立面（而且 M1 装的 mitigation 就是"内核级反注入"）。
+**已完成 6 个 milestone（M0~M5）**。M4（攻：注入+hook）和 M5（守：反注入）互为镜像，用同一套 injector 做了攻防对照。下一站 M6 转向网络管控（WFP），jailbreak-7 的 TCP 8.8.8.8 就该被那层拦下。
 
 ---
 
@@ -192,7 +192,7 @@ Mandatory Label 段落尤其关键——你会看到 `SECURITY_MANDATORY_LOW_RID
 
 ---
 
-### ⏳ M5 — 反注入 + 运行时检测
+### ✅ M5（已完成）— 反注入 + 运行时检测
 
 **代码将用到**：`LdrRegisterDllNotification`、模块签名验证（`WinVerifyTrust`）、`CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD)` 检测远程线程
 
@@ -316,6 +316,7 @@ Mandatory Label 段落尤其关键——你会看到 `SECURITY_MANDATORY_LOW_RID
 - `docs/notes/M3.md` — M3 完整笔记 + Broker/Target IPC + DuplicateHandle + 管道 SDDL 双门坑 + 4 条金牌话术
 - `docs/notes/M4.md` — M4 完整笔记 + 注入四件套 + MinHook Inline Hook + "注入垫片继承 target 权限不提权"坑 + 5 条金牌话术
 - `docs/notes/M4_appendix.md` — M4 附加深挖：Inline Hook vs OC Swizzling 对比 + jmp 改写调用时序/trampoline + kernel32 共享基址/ASLR开机随机一次 + PE 装载/导入表·导出表·IAT/静态vs动态调用（注入与 hook 的底层地基）
+- `docs/notes/M5.md` — M5 完整笔记 + 反注入双层（内核 mitigation + 用户态 self_defense）+ LdrRegisterDllNotification/远程线程扫描/API inline-hook 自检 + 用 M4 injector 攻防对照（防御ON注入被挡/OFF得手）+ 5 条金牌话术
 - **`docs/notes/kernel_objects_101.md`** ⭐ — **横切基础**：Object Manager / OBJECT_TYPE / HANDLE 表 / SeAccessCheck / KILL_ON_JOB_CLOSE 回调 / AppContainer 命名空间前缀劫持。所有 milestone 遇到"内核里到底怎么实现的"这类问题先来这里查
 - **`docs/notes/tools_cheatsheet.md`** ⭐ — **工具速查表**：Process Explorer / WinObj / ProcMon / dumpbin / WinDbg / wf.msc 等所有沙箱开发调试常用工具，按用途分类 + 每个工具"什么时候用它 + 对应我们代码哪个场景"
 - `README.md` — 工程总览 + JD 关键词映射

@@ -1,3 +1,9 @@
 
 sandbox_demo/build
 sandbox_demo/build_m0
+
+# 注意：src/third_party/minhook 是 vendored 的第三方源码（M4 API Hook 用），
+# 通过 git clone 引入、未纳入本仓库版本控制。它**不应**被忽略或清理——
+# 若执行 git clean 请务必带 -e sandbox_demo/src/third_party/ 排除它，
+# 否则 minhook 源码会被删，导致 CMake configure 失败（No SOURCES for minhook）。
+# 恢复方法：git clone --depth 1 https://github.com/TsudaKageyu/minhook.git sandbox_demo/src/third_party/minhook

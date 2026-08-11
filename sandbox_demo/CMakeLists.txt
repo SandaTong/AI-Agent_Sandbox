@@ -80,6 +80,7 @@ add_library(sandbox_core STATIC
     src/core/pipe_server.cc
     src/core/pipe_client.cc
     src/core/injector.cc
+    src/core/self_defense.cc
 )
 target_include_directories(sandbox_core PUBLIC src)
 target_link_libraries(sandbox_core PUBLIC
@@ -109,6 +110,10 @@ target_link_libraries(m3_demo PRIVATE sandbox_core)
 add_executable(m4_demo src/demo/m4_demo.cc)
 target_link_libraries(m4_demo PRIVATE sandbox_core)
 
+# ----- M5 演示程序（反注入 mitigation + 运行时自检；用 M4 injector 攻防对照）--
+add_executable(m5_demo src/demo/m5_demo.cc)
+target_link_libraries(m5_demo PRIVATE sandbox_core)
+
 # ----- sandbox_hook.dll：被注入进 target 的拦截垫片（MinHook 钩 CreateFileW）--
 # 静态链接 CRT，保持和 hello_target 一致（避免注入后依赖非签名 debug CRT）。
 # 链接 minhook静态库（vendored）。
@@ -131,10 +136,14 @@ set_property(TARGET sandbox_hook PROPERTY
 # 这些 debug CRT（它们不带 Microsoft 根证书签名），导致 target 启动就
 # 报 0xC0000142 (STATUS_DLL_INIT_FAILED)。静态链接后所有 CRT 代码都编进
 # hello_target.exe 自身，加载器不再拉外部 DLL，mitigation 就通过了。
-# hello_target 额外编入 pipe_client.cc（M3 IPC 客户端）。它不链接
-# sandbox_core（避免拖入 userenv 等重依赖），只带它自己需要的那一个 IPC
-# 源文件；pipe_client 是纯 Win32（kernel32），依赖的 common/*.h 是 header-only。
-add_executable(hello_target src/demo/hello_target.cc src/core/pipe_client.cc)
+# hello_target 额外编入 pipe_client.cc（M3 IPC 客户端）和 self_defense.cc
+# （M5 运行时自检）。它不链接 sandbox_core（避免拖入 userenv 等重依赖），
+# 只带它自己需要的那几个源文件；这些都是纯 Win32（kernel32/ntdll/toolhelp），
+# 依赖的 common/*.h 是 header-only。
+add_executable(hello_target
+    src/demo/hello_target.cc
+    src/core/pipe_client.cc
+    src/core/self_defense.cc)
 target_link_libraries(hello_target PRIVATE advapi32.lib)
 set_property(TARGET hello_target PROPERTY
     MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
@@ -160,6 +169,7 @@ set_target_properties(m1_demo       PROPERTIES FOLDER "demo")
 set_target_properties(m2_demo   PROPERTIES FOLDER "demo")
 set_target_properties(m3_demo       PROPERTIES FOLDER "demo")
 set_target_properties(m4_demo       PROPERTIES FOLDER "demo")
+set_target_properties(m5_demo       PROPERTIES FOLDER "demo")
 set_target_properties(sandbox_hook  PROPERTIES FOLDER "demo")
 set_target_properties(hello_target  PROPERTIES FOLDER "demo")
 set_target_properties(unsigned_probe PROPERTIES FOLDER "demo")

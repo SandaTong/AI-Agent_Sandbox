@@ -23,7 +23,8 @@
 #include <io.h>     // _setmode / _fileno
 #include <string>   // std::wstring（jailbreak-4拼 DLL 路径用）
 
-#include "core/pipe_client.h"  // 【M3】target 侧 IPC client
+#include "core/pipe_client.h"   // 【M3】target 侧 IPC client
+#include "core/self_defense.h"  // 【M5】target 侧运行时自检（反注入检测）
 
 #pragma comment(lib, "ws2_32.lib")
 
@@ -344,14 +345,55 @@ void RunIpcClientDemo() {
     std::wprintf(L"[target] === IPC 演示结束 ===\n\n");
 }
 
+// -----------------------------------------------------------------------------
+// 【M5】运行时自检报告：把 SelfDefense 的发现打印出来。target 是被保护方，
+// 这里演示"我自己查我自己有没有被注入 / 被 inline hook"。
+//   - 若 broker 开满了反注入 mitigation，M4 那种注入根本进不来 → 自检应"干净"
+//   - 若 mitigation 关着（如 M4 场景），注入得手 → 自检应报出可疑 DLL/线程/API 篡改
+// 这一对照正是 M5 的核心：内核挡（mitigation）+ 用户态查（本自检）双层。
+// -----------------------------------------------------------------------------
+void PrintFindings(const wchar_t* phase, const std::vector<sandbox::DefenseFinding>& fs) {
+    if (fs.empty()) {
+        std::wprintf(L"  [selfcheck] %ls: 干净，未发现异常\n", phase);
+        return;
+    }
+    for (const auto& f : fs) {
+        const wchar_t* tag = L"?";
+        switch (f.kind) {
+            case sandbox::DefenseFinding::Kind::kSuspiciousDll:
+                tag = L"可疑DLL";
+                break;
+            case sandbox::DefenseFinding::Kind::kSuspiciousThread:
+                tag = L"可疑线程";
+                break;
+            case sandbox::DefenseFinding::Kind::kApiTampered:
+                tag = L"API被篡改";
+                break;
+        }
+        std::wprintf(L"  [selfcheck][ALERT][%ls] %ls\n", tag, f.detail.c_str());
+    }
+}
+
+void RunSelfCheckDemo(sandbox::SelfDefense& sd) {
+    std::wprintf(L"\n[target] === 运行时自检（M5 反注入检测）===\n");
+    // 手段①的异步结果：启动以来 DLL 加载通知累积的告警。
+    PrintFindings(L"DLL加载监控", sd.DrainDllFindings());
+    // 手段②③：跑一次全量自检（可疑远程线程 + 关键 API 完整性）。
+    PrintFindings(L"全量扫描", sd.ScanOnce());
+    std::wprintf(L"[target] === 自检结束 ===\n\n");
+}
+
 }  // namespace
 
 int wmain(int argc, wchar_t** argv) {
-    // 解析参数：带 --ipc 时在越狱测试后跑一段 M3 IPC 客户端演示。
+    // 解析参数：--ipc 跑 M3 IPC 演示；--selfcheck 跑 M5 运行时自检。
     bool run_ipc = false;
+    bool run_selfcheck = false;
     for (int i = 1; i < argc; ++i) {
         if (wcscmp(argv[i], L"--ipc") == 0)
             run_ipc = true;
+        else if (wcscmp(argv[i], L"--selfcheck") == 0)
+            run_selfcheck = true;
     }
 
     // ---- stdio初始化 ----
@@ -389,6 +431,13 @@ int wmain(int argc, wchar_t** argv) {
     std::wprintf(L"[target] image=%ls\n", exe_path);
     std::wprintf(L"[target] integrity_level=%ls\n", GetOwnIntegrityLevel());
 
+    // 【M5】尽早装 DLL 加载监控——越早越能抓到启动后被注入的模块。
+    // 放在越狱测试之前，这样若有人在此期间注入 DLL，加载通知能第一时间记下。
+    sandbox::SelfDefense self_defense;
+    if (run_selfcheck) {
+        self_defense.StartDllLoadMonitor();
+    }
+
     std::wprintf(L"\n[target] === 开始越狱测试 ===\n");
     Test1_WriteDesktopFile();
     Test2_SpawnChildProcess();
@@ -402,6 +451,11 @@ int wmain(int argc, wchar_t** argv) {
     // 【M3】可选：跑 IPC 客户端演示（委托 broker 代劳打开文件）。
     if (run_ipc) {
         RunIpcClientDemo();
+    }
+
+    // 【M5】可选：跑运行时自检（检测启动以来有没有被注入 / 被 inline hook）。
+    if (run_selfcheck) {
+        RunSelfCheckDemo(self_defense);
     }
 
     std::wprintf(L"[target] 每 2 秒发一次心跳。按 Ctrl+C 或关闭窗口即可退出。\n");

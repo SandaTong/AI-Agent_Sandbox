@@ -349,7 +349,50 @@ Low IL target 下，注入成功、hook 装上了，但钩子里写文件日志�
 
 **运行**：`run_m4.bat`（Low IL，用 DebugView 看 hook 日志）/ `run_m4_noil.bat`（Medium IL，文件日志可落盘）；或 `.\build_m0\Debug\m4_demo.exe [--strict N] [--no-il] <target.exe>`。
 
-### ⏳ M5 及以后 — 见 Roadmap 表
+### ✅ M5 — 反注入 + 运行时检测（防御双层：内核挡 + 用户态查）
+
+**M4 的镜像面**。M4 做"攻"（注入 + hook），M5 做"守"——怎么让别人别想注入我 / 篡改我。核心洞见：**反注入是两层配合，不是一层**。
+
+```
+有人想注入 target
+   ├─ 第一层 内核护栏（Mitigation Policy）：从进程创建绑在 EPROCESS，无法绕过 → 注入进不来（拦）
+   └─ 第二层 用户态自检（target 自己查自己）：内核挡不住/开不满时兜底 → 注入进来也能发现（报）
+```
+
+**第一层 反注入 mitigation**（broker 侧，M1 就有的 policy 位，正面用于反注入语义）：
+
+| Mitigation 位 | 防的注入手法 |
+|---|---|
+| `BLOCK_NON_MICROSOFT_BINARIES` | 远程线程 LoadLibrary 注入未签名 dll（M4 那种，主力拦截） |
+| `PROHIBIT_DYNAMIC_CODE` | inline hook 改 API 机器码 / RWX shellcode |
+| `DISABLE_EXTENSION_POINTS` | AppInit_DLLs / SetWindowsHookEx 全局钩子注入 |
+
+**第二层 用户态运行时自检**（`core/self_defense.{h,cc}`，跑在 target 内部）：
+
+1. **`LdrRegisterDllNotification`** — 实时抓 DLL 加载事件，白名单外的 DLL 加载即告警（比轮询模块列表无窗口期）
+2. **可疑远程线程扫描** — 枚举线程起始地址，起点是 `LoadLibraryW` 或落在裸内存的判为可疑
+3. **关键 API inline-hook 自检** — 读 `CreateFileW` 头字节，被改成 `jmp`（E9/FF25/48B8…）即疑似被 hook
+
+#### M5 实测：用 M4 injector 做攻防对照（硬证据）
+
+同一套 M4 远程线程注入器，开/关反注入 mitigation 结果相反：
+
+```
+[防御ON+攻击]  sandbox_hook 注入进 target?  False   ← ⭐ BLOCK_NON_MICROSOFT_BINARIES 挡住
+[防御OFF+攻击] sandbox_hook 注入进 target?  True    ← 关掉防御，注入得手（复现 M4）
+```
+
+`run_m5_defenseoff.bat`（注入得手）时 target 自检三条告警全命中（DebugView 可见）：可疑 DLL + API 被篡改（E9 jmp）+ 可疑线程（起点=LoadLibraryW）——**内核没挡住时用户态兜底发现**。
+
+#### M5 关键点：攻防同源
+
+M4 为了能注入，特意关掉 `PROHIBIT_DYNAMIC_CODE` / `BLOCK_NON_MICROSOFT_BINARIES`——**这恰恰说明它们本质就是"内核级反注入"**。M5 第一层不用新造，把 M4 关掉的正面开回来即是。攻和防是同一套机制的两面。
+
+详见 [`docs/notes/M5.md`](sandbox_demo/docs/notes/M5.md)（5 条金牌面试话术）。
+
+**运行**：`run_m5.bat`（防御全开基线）/ `run_m5_attack.bat`（防御全开 + 注入，应被挡）/ `run_m5_defenseoff.bat`（关防御 + 注入，得手但自检报警）；或 `.\build_m0\Debug\m5_demo.exe [--defense-off] [--attack] [--no-il] <target.exe> --selfcheck`。
+
+### ⏳ M6 及以后 — 见 Roadmap 表
 
 ---
 
