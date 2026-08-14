@@ -1,8 +1,8 @@
 # 项目记忆 — sandbox_demo (Windows 沙箱)
 
 ## 项目目标
-基于 Windows 安全机制实现一个进程沙箱。当前已推进到 M4(在 M3 基础上叠加 DLL 注入 + API Hook 运行时拦截层)。
-M0~M4 路线图全部完成。
+基于 Windows 安全机制实现一个进程沙箱。当前已推进到 M5(target 侧运行时自检 / 反注入反篡改检测层)。
+M0~M5 路线图全部完成。
 
 ## M0 架构(双支柱 + 三步舞)
 - **支柱一 TokenManager**(`core/token_manager.cc`):`CreateRestrictedToken(DISABLE_MAX_PRIVILEGE)`
@@ -99,6 +99,29 @@ M0~M4 路线图全部完成。
     5. kernel32.dll 在同一 session 所有进程里加载基址相同 → broker 取的 LoadLibraryW 地址在 target 同样有效(注入成立前提)。
   - **M4 在沙箱里的位置**:M0~M2 是"被动配置内核机制"(内核强制执行),M3 是"target 主动请 broker 代劳",M4 是"broker 主动植入 hook 让 target 的调用被无感知拦截转发"——和 Chromium sandbox 的 "interceptions" 机制对应。
   - **M4 vs M0~M3 维度区别**:M0~M3 是"内核态执行"(约束靠 SRM/Job/EPROCESS);M4 是"用户态拦截"(hook 改函数头几字节,纯用户态)。M4 更早、更细粒度,但可被绕(改内存保护/直接 syscall)。
+- M5: ~~target 侧运行时自检(反注入/反篡改检测层)。~~ 已完成。M4 的攻防翻转版。
+  - 新增 `core/self_defense.{h,cc}`:`SelfDefense` 类——**跑在 target 自己内部**(与 M0~M4 broker 外部配置的根本区别,不依赖 broker)。
+    三个检测手段分别对应 M4 的三种攻击向量:
+    ① **DLL 加载通知**(`LdrRegisterDllNotification` ntdll 半公开 API):注册回调,每次 LoadLibrary/映像映射时内核加载器回调带全路径。
+       对照白名单(System32/SysWOW64/WinSxS/SystemApps),白名单外 DLL 被加载即告警——正好抓 M4"远程线程 LoadLibraryW(sandbox_hook.dll)"注入。比轮询遍历模块列表实时得多(加载瞬间就知道)。
+       `LdrUnregisterDllNotification` 析构注销。SDK 无原型,自己补齐 LDR_DLL_LOADED_NOTIFICATION_DATA 结构。
+    ② **可疑远程线程扫描**(`CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD)` + `NtQueryInformationThread(ThreadQuerySetWin32StartAddress=9)` 取线程起始地址):
+       起点不在任何已加载模块内(疑似裸内存 shellcode) 或 起点正好是 LoadLibraryW/A(典型远程线程注入入口) → 可疑。
+       注:线程起点若是 LoadLibraryW 会落在 kernel32 模块内,单看"是否有归属"抓不到,故额外比对 LoadLibraryW/A 地址。
+    ③ **关键 API inline-hook 篡改自检**:读 kernel32!CreateFileW/A 头几字节,看是否被改成跳转指令形态(E9 jmp rel32 / FF25 jmp [rip+disp] / 48B8 mov rax,imm64 / 68 push+ret)。
+    - `DefenseFinding` 三种 Kind:kSuspiciousDll / kSuspiciousThread / kApiTampered。
+    - API:`StartDllLoadMonitor()`(异步,手段①)、`ScanOnce()`(同步全量,手段②③)、`DrainDllFindings()`(取手段①累积结果)。
+    - 回调是 C 风格,用文件级静态 `g_dll_mtx`/`g_dll_findings` 桥接到实例。白名单策略:系统目录可信,其余(尤其 temp/用户目录/UNC)可疑;生产应做签名校验+精确清单。
+  - 新增 `demo/m5_demo.cc`:三种对照模式:
+    1) 纯防御(默认):开满反注入 mitigation,不注入 → target --selfcheck 自检应干净(基线)
+    2) 防御+攻击(`--attack`):开满 mitigation + injector 注入 → ⭐预期注入被内核挡下,自检仍干净
+    3) 关防御+攻击(`--defense-off --attack`):复现 M4,注入得手 → ⭐target 自检应报警(可疑DLL/线程/API篡改)
+    - M5 mitigation 默认**开满反注入三件套**(与 M4 核心区别):prohibit_dynamic_code + strict_signed_dll + disable_extension_points。`--defense-off` 全关复现 M4。
+    - 用法:`m5_demo.exe [--defense-off] [--attack] [--no-il] <target_exe> [args...]`(建议 target 带 `--selfcheck`)
+  - `demo/hello_target.cc` 接入 M5:新增 `--selfcheck` 参数。启动时尽早 `StartDllLoadMonitor()`(越狱测试之前,越早越能抓注入);越狱测试后 `RunSelfCheckDemo(sd)` 打印 `[selfcheck]` 结果。
+  - 新增 `demo/unsigned_probe.cc`:非微软签名探测 DLL(M1 BLOCK_NON_MICROSOFT_BINARIES 验证用,未签名。LoadLibraryW 加载 exe 走快速路径绕校验,用独立真 DLL 才干净演示拦截点)。
+  - **M5 在沙箱里的定位**:M0~M2 是"被动配置内核机制"(内核强制执行),M3 是"target 主动请 broker 代劳",M4 是"broker 主动植入 hook",M5 是"target 自己查自己有没有被注入/被篡改"——双层防御里的第二道。
+  - **为什么内核 mitigation 之外还要用户态检测**:内核 mitigation 是第一道(最强,从娘胎带出来无法绕),但两个盲区:① 只"拦"不"报"——被拦的攻击 target 自己不知道,安全产品需"感知到有人在打我"(上报/取证/熔断);② 不是所有环境都能开满(兼容性:target 可能依赖未签名第三方 DLL 就不能开 BLOCK_NON_MICROSOFT_BINARIES),开不满时用户态检测是补位的第二道。所以生产级沙箱(含 Chromium/EDR)都是"内核挡+用户态查"双层。
 
 ## 技术约定
 - 使用 `ScopedHandle` 做 HANDLE 的 RAII 管理,避免句柄泄漏。

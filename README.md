@@ -29,15 +29,15 @@
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│                            Broker.exe                │
+│                            Broker.exe                │          │
 │  ┌────────────┐  ┌────────────┐  ┌────────────┐  ┌───────────┐  │
 │  │Policy      │  │File Broker │  │WFP Engine  │  │Anti-Inject│  │
-│  │Engine      │  │(user-mode) │  │(netACL)   │  │Detector   │  │
+│  │Engine      │  │(user-mode) │  │(netACL)    │  │Detector   │  │
 │  └────────────┘  └────────────┘  └────────────┘  └───────────┘  │
 │         ▲                                                       │
 │         │ Named-Pipe IPC (msg framing)                          │
 │         ▼                                                       │
-│  ┌───────────────────────────── Target.exe ─────────────────────┐│
+│  ┌───────────────────────────── Target.exe ─────────────────────┐
 │  │ Job Object + Low IL + AppContainer + Mitigation + AltDesktop││
 │  │       Agent code runs here (LLM tool-use / shell / net)     ││
 │  └─────────────────────────────────────────────────────────────┘│
@@ -45,8 +45,8 @@
                                   │  DeviceIoControl
                                   ▼
                     ┌───────────────────────────┐
-                    │ sandbox_flt.sys (kernel)│
-                    │  Minifilter：拦文件 IRP│
+                    │ sandbox_flt.sys (kernel)  │
+                    │  Minifilter：拦文件 IRP   │
                     └───────────────────────────┘
 ```
 
@@ -56,8 +56,8 @@
     ┌──────────── m1_demo.exe（Broker 雏形）──────────────┐
     │                                                     │
     │  JobManager   +   TokenManager   +   MitigationList │
-    │       │    │(+ Low IL)          │           │
-    │       │              │                │      │
+    │       │              │(+ Low IL)             │     │
+    │       │              │                       │      │
     │       └──ProcessLauncher─────────────────────┘      │
     │                │                               │
     │      + DesktopIsolation (WinSta+Desktop)            │
@@ -86,7 +86,7 @@
 | D6 | **M3** Broker/Target 双进程 + Named-Pipe IPC | 拆成 `broker.exe` + `target.exe` | W1/W5 | ⏳ |
 | D7-8 | **M4** 注入与 Hook（正向） | `injector.exe` + MinHook 拦截 `CreateFileW` | W4 | ⏳ |
 | D9 | **M5** 反注入与运行时检测 | `LdrRegisterDllNotification` + 模块白名单 + 远程线程检测 | W4 | ⏳ |
-| D10-12 | **M6** WFP 网络管控 | 用户态 WFP：进程 + IP + 端口 + 协议 白/黑名单 | W3 | ⏳ |
+| D10-12 | **M6** WFP 网络管控 | 用户态 WFP：进程 + IP + 端口 + 协议 白/黑名单 | W3 | ✅ |
 | D13 | **M7** 域名维度控制 | DNS 层Hook 或旁路 DNS 服务器 | W3 | ⏳ |
 | D14-15 | **M8** 用户态文件隔离 | Broker 代理受限文件访问 + NTFS ACL 收敛 | W2 | ⏳ |
 | D16-18 | **M9** 内核 Minifilter | `sandbox_flt.sys` PreCreate 按PID + 路径拦截 | W2 | ⏳ |
@@ -392,7 +392,26 @@ M4 为了能注入，特意关掉 `PROHIBIT_DYNAMIC_CODE` / `BLOCK_NON_MICROSOFT
 
 **运行**：`run_m5.bat`（防御全开基线）/ `run_m5_attack.bat`（防御全开 + 注入，应被挡）/ `run_m5_defenseoff.bat`（关防御 + 注入，得手但自检报警）；或 `.\build_m0\Debug\m5_demo.exe [--defense-off] [--attack] [--no-il] <target.exe> --selfcheck`。
 
-### ⏳ M6 及以后 — 见 Roadmap 表
+### ✅ M6 — WFP 用户态网络管控（按进程 / 按远程 IP 拦 outbound）
+
+用 **WFP（Windows Filtering Platform）** 在 `ALE_AUTH_CONNECT_V4` 层加**纯用户态 filter**，比 M2 的 Windows Firewall 更底层、更精确，并**补上 M2 § 九留的 loopback 债**。DYNAMIC 会话，进程退出由 BFE 自动清理，不留残留。
+
+**两种形态（各一个 demo）**：
+
+| 形态 | demo | 匹配条件 | 实测 |
+|---|---|---|---|
+| **AppID 精确拦** ⭐ | `m6_appid_demo.cc` | `ALE_APP_ID`（exe 路径） | ✅ target 全部 outbound 三行全 BLOCKED，**连 127.0.0.1 loopback 都拦**（`WSAErr=10013`）—— 还清 M2 loopback 债 |
+| IP 黑名单 | `m6_demo.cc` | `IP_REMOTE_ADDRESS` | ⚠️ filter 装配完全正确（netsh 可见 `8.8.8.8/32`）但本机纯用户态该层 IP 条件**不命中** |
+
+**为什么 WFP 能拦 loopback 而 Firewall 不能**：Firewall 是 WFP 的上层应用且对 loopback 默认 bypass；WFP 直接挂 ALE 连接授权层，loopback 也经过该层。
+
+**M6 最硬的坑（IP 精确匹配不命中）**：`IP_REMOTE_ADDRESS` 的 UINT32/ADDR_MASK × 主机序/网络序四种组合全试尽都不命中；用 `M6_BLOCK_ALL` 无条件 BLOCK 做对照三行全拦，**定性证明**——本会话裸 BLOCK 有效、AppID 条件有效、唯独 IP 条件在 `connect()` 授权瞬间求值被环境仲裁短路，属 WFP 分层语义 + 本机环境层面，纯用户态改不动，要稳需内核态 callout。附带两个工程坑：① netsh 显示按主机序反解，"显示对≠运行时匹配对"；② exe 被残留进程占用致 `LNK1168` 静默未更新（跑的还是旧 exe）。
+
+详见 [`docs/notes/M6.md`](sandbox_demo/docs/notes/M6.md)。
+
+**运行**（需管理员权限）：`run_m6_appid.bat`（AppID 形态，三行应全 BLOCKED）/ `run_m6.bat`（IP 黑名单，本机 IP 条件不命中）。
+
+### ⏳ M7 及以后 — 见 Roadmap 表
 
 ---
 

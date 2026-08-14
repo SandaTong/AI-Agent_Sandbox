@@ -215,63 +215,54 @@ void Test6_OpenGlobalNamedObject() {
     }
 }
 
-void Test7_TryNetworkConnect() {
-    // AppContainer 网络策略【实测校准结论】完全依赖 Windows Firewall 用户
-    // 态规则引擎（M2 加餐补丁前 target 网络出方向一路漏，见 docs/notes/
-    // M2.md § 九、十一）。加餐补丁后 broker 通过 INetFwPolicy2 COM API 加了
-    // 一条针对 Package SID 的 outbound TCP block 规则，此时**公网出方向**
-    // 才会真被拦。
-    //
-    // ⚠️ 关键陷阱：**Windows Firewall 对 loopback (127.0.0.1 / ::1) 流量
-    //    有 bypass**——mpssvc 判定引擎不对回环走规则匹配路径。所以我们必
-    //    须打**公网 IP** 才能观察到firewall 规则的效果。这里选 8.8.8.8:80
-    //    （Google DNS 永远可达的服务器），SYN 会在规则表判定阶段被拒。
-    //
-    // 判定：
-    //   * baseline / M0 / M1：路径通到公网，SYN 出去了，可能连上 (r=0) 或
-    //     等超时 (WSAETIMEDOUT)—— 无论哪种都算 SUCCESS
-    //   * M2 无 firewall 规则（broker 非管理员或没加）：同上SUCCESS
-    //   * M2 有 firewall 规则（管理员+ 加餐补丁生效）：WSAEACCES (10013) BLOCKED ⭐
-    //   * M2 --net：broker 跳过加规则，SUCCESS
-    WSADATA wsa{};
-    if (::WSAStartup(MAKEWORD(2, 2), &wsa) != 0) {
-        std::wprintf(L"  [jailbreak-7] TCP 8.8.8.8:80    : BLOCKED  (WSAStartup 失败)\n");
-        return;
-    }
+// 连一个 IPv4:port，返回判定字符串。WFP/Firewall 拦下时 connect 会得
+// WSAEACCES(10013)；SYN 出去了则 r==0 或 WSAETIMEDOUT。M6 用它探测多个目标。
+void TryConnectOne(const char* ip, u_short port, const wchar_t* label) {
     SOCKET s = ::socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
     if (s == INVALID_SOCKET) {
-        std::wprintf(L"  [jailbreak-7] TCP 8.8.8.8:80    : BLOCKED  (socket() gle=%d)\n",
-                     ::WSAGetLastError());
-        ::WSACleanup();
+        std::wprintf(L"  %ls : BLOCKED  (socket() gle=%d)\n", label, ::WSAGetLastError());
         return;
     }
     sockaddr_in addr{};
     addr.sin_family = AF_INET;
-    addr.sin_port = ::htons(80);
-    ::inet_pton(AF_INET, "8.8.8.8", &addr.sin_addr);
+    addr.sin_port = ::htons(port);
+    ::inet_pton(AF_INET, ip, &addr.sin_addr);
 
-    DWORD timeout_ms = 1500;
+    DWORD timeout_ms = 1200;
     ::setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, reinterpret_cast<const char*>(&timeout_ms),
                  sizeof(timeout_ms));
 
     int r = ::connect(s, reinterpret_cast<sockaddr*>(&addr), sizeof(addr));
     int err = ::WSAGetLastError();
     ::closesocket(s);
-    ::WSACleanup();
 
-    // WSAEACCES (10013)     -> firewall 规则拦下(M2 加餐补丁生效)
-    // r == 0 / WSAETIMEDOUT -> SYN 发出去了，沙箱没拦
     if (err == WSAEACCES) {
-        std::wprintf(
-            L"  [jailbreak-7] TCP 8.8.8.8:80    : BLOCKED  (WSAErr=%d, Firewall 规则拦下)\n", err);
-    } else if (r == 0 || err == WSAETIMEDOUT) {
-        std::wprintf(
-            L"  [jailbreak-7] TCP 8.8.8.8:80    : SUCCESS (SYN 出去了，沙箱没拦，WSAErr=%d)\n",
-            err);
+        std::wprintf(L"  %ls : BLOCKED  (WSAErr=%d, WFP/Firewall 规则拦下) ⭐\n", label, err);
+    } else if (r == 0 || err == WSAETIMEDOUT || err == WSAECONNREFUSED) {
+        // r==0 连上；TIMEDOUT SYN 出去没回；CONNREFUSED 到达对端但端口关（loopback 常见）
+        // —— 三者都说明"包发出去了，没被沙箱拦"。
+        std::wprintf(L"  %ls : SUCCESS (出方向未被拦，WSAErr=%d)\n", label, err);
     } else {
-        std::wprintf(L"  [jailbreak-7] TCP 8.8.8.8:80    : ??  (WSAErr=%d 请对照 winerror.h)\n",
-                     err);
+        std::wprintf(L"  %ls : ??  (WSAErr=%d 请对照 winerror.h)\n", label, err);
     }
+}
+
+void Test7_TryNetworkConnect() {
+    // 【M6 升级】探测三个目标，用来观察 WFP 网络管控的效果：
+    //   ① 8.8.8.8    —— 白名单**外**公网 IP：M6 IP 白名单形态下应 BLOCKED
+    //   ② 1.1.1.1    —— 白名单**内**公网 IP：M6 IP 白名单形态下应 SUCCESS（放行）
+    //   ③ 127.0.0.1  —— loopback 回环：M2 的 Windows Firewall 对它 bypass 拦不下，
+    //                    M6 的 WFP 能拦（补 M2 § 九留的债）。AppID 形态下应 BLOCKED
+    // 不同 demo 装不同 WFP 策略时，这三行的 SUCCESS/BLOCKED 组合就是策略效果的读数。
+    WSADATA wsa{};
+    if (::WSAStartup(MAKEWORD(2, 2), &wsa) != 0) {
+        std::wprintf(L"  [jailbreak-7] 网络测试 : BLOCKED  (WSAStartup 失败)\n");
+        return;
+    }
+    TryConnectOne("8.8.8.8", 80, L"[jailbreak-7a] TCP 8.8.8.8:80   (白名单外公网)");
+    TryConnectOne("1.1.1.1", 80, L"[jailbreak-7b] TCP 1.1.1.1:80   (白名单内公网)");
+    TryConnectOne("127.0.0.1", 80, L"[jailbreak-7c] TCP 127.0.0.1:80 (loopback回环)");
+    ::WSACleanup();
 }
 
 // -----------------------------------------------------------------------------

@@ -81,6 +81,7 @@ add_library(sandbox_core STATIC
     src/core/pipe_client.cc
     src/core/injector.cc
     src/core/self_defense.cc
+    src/core/wfp_filter.cc
 )
 target_include_directories(sandbox_core PUBLIC src)
 target_link_libraries(sandbox_core PUBLIC
@@ -88,6 +89,7 @@ target_link_libraries(sandbox_core PUBLIC
     user32.lib
     advapi32.lib
     userenv.lib
+    fwpuclnt.lib
 )
 
 # ----- M0 演示程序 -----------------------------------------------------------
@@ -113,6 +115,14 @@ target_link_libraries(m4_demo PRIVATE sandbox_core)
 # ----- M5 演示程序（反注入 mitigation + 运行时自检；用 M4 injector 攻防对照）--
 add_executable(m5_demo src/demo/m5_demo.cc)
 target_link_libraries(m5_demo PRIVATE sandbox_core)
+
+# ----- M6 演示程序（WFP 用户态网络管控） -----------------------------------
+# 形态 A：IP 白名单（默认拦 outbound + 放行白名单 IP，限定到 target）
+add_executable(m6_demo src/demo/m6_demo.cc)
+target_link_libraries(m6_demo PRIVATE sandbox_core)
+# 形态 C：AppID 精确匹配（按 exe 路径拦 target 全部 outbound，含 loopback）
+add_executable(m6_appid_demo src/demo/m6_appid_demo.cc)
+target_link_libraries(m6_appid_demo PRIVATE sandbox_core)
 
 # ----- sandbox_hook.dll：被注入进 target 的拦截垫片（MinHook 钩 CreateFileW）--
 # 静态链接 CRT，保持和 hello_target 一致（避免注入后依赖非签名 debug CRT）。
@@ -170,6 +180,8 @@ set_target_properties(m2_demo   PROPERTIES FOLDER "demo")
 set_target_properties(m3_demo       PROPERTIES FOLDER "demo")
 set_target_properties(m4_demo       PROPERTIES FOLDER "demo")
 set_target_properties(m5_demo       PROPERTIES FOLDER "demo")
+set_target_properties(m6_demo       PROPERTIES FOLDER "demo")
+set_target_properties(m6_appid_demo PROPERTIES FOLDER "demo")
 set_target_properties(sandbox_hook  PROPERTIES FOLDER "demo")
 set_target_properties(hello_target  PROPERTIES FOLDER "demo")
 set_target_properties(unsigned_probe PROPERTIES FOLDER "demo")
