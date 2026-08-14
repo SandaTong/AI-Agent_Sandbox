@@ -1,8 +1,8 @@
 # 项目记忆 — sandbox_demo (Windows 沙箱)
 
 ## 项目目标
-基于 Windows 安全机制实现一个进程沙箱。当前已推进到 M5(target 侧运行时自检 / 反注入反篡改检测层)。
-M0~M5 路线图全部完成。
+基于 Windows 安全机制实现一个进程沙箱。当前已推进到 M6(WFP 用户态网络管控层,还 M2 留下的网络债)。
+M0~M6 路线图全部完成。
 
 ## M0 架构(双支柱 + 三步舞)
 - **支柱一 TokenManager**(`core/token_manager.cc`):`CreateRestrictedToken(DISABLE_MAX_PRIVILEGE)`
@@ -122,6 +122,29 @@ M0~M5 路线图全部完成。
   - 新增 `demo/unsigned_probe.cc`:非微软签名探测 DLL(M1 BLOCK_NON_MICROSOFT_BINARIES 验证用,未签名。LoadLibraryW 加载 exe 走快速路径绕校验,用独立真 DLL 才干净演示拦截点)。
   - **M5 在沙箱里的定位**:M0~M2 是"被动配置内核机制"(内核强制执行),M3 是"target 主动请 broker 代劳",M4 是"broker 主动植入 hook",M5 是"target 自己查自己有没有被注入/被篡改"——双层防御里的第二道。
   - **为什么内核 mitigation 之外还要用户态检测**:内核 mitigation 是第一道(最强,从娘胎带出来无法绕),但两个盲区:① 只"拦"不"报"——被拦的攻击 target 自己不知道,安全产品需"感知到有人在打我"(上报/取证/熔断);② 不是所有环境都能开满(兼容性:target 可能依赖未签名第三方 DLL 就不能开 BLOCK_NON_MICROSOFT_BINARIES),开不满时用户态检测是补位的第二道。所以生产级沙箱(含 Chromium/EDR)都是"内核挡+用户态查"双层。
+- M6: ~~WFP 用户态网络管控(还 M2 留下的两笔债)。~~ 已完成。
+  - **M6 要解决的债**:M2 firewall 加餐(INetFwPolicy2 COM)有两个硬伤:
+    ① loopback bypass——Windows Firewall 对 127.0.0.1/::1 不走规则匹配,回环流量拦不下。
+    ② 只能按 Package SID 匹配——普通 Low IL target(非 AppContainer)拦不了。
+    且 jailbreak-7(TCP 8.8.8.8)从 M0 到 M5 一直是 SUCCESS——target 网络出口从没被真正精确管控过。M6 用 WFP 补齐。
+  - 新增 `core/wfp_filter.{h,cc}`:`WfpFilter` 类,用户态 WFP 过滤器管理器。RAII:析构关 engine,DYNAMIC 会话所有 filter 由 BFE 自动清理(进程崩也不残留脏规则,比 INetFwPolicy2 析构手动删更稳)。
+    四个核心概念(编程模型):
+    1) **Engine(引擎)**:`FwpmEngineOpen0` 打开到内核过滤引擎的会话句柄。用 `FWPM_SESSION_FLAG_DYNAMIC` 标志。
+    2) **Layer(分层)**:内核网络栈固定挂载点。用 `FWPM_LAYER_ALE_AUTH_CONNECT_V4`(ALE 在 connect() 发起出站连接时的授权分层),能拿远程IP/端口/发起进程AppID。
+    3) **Sublayer(子层)**:自建 sublayer 把 filter 归组,便于按 key 一次性清理,隔离权重仲裁。
+    4) **Filter(过滤器)**:一条规则 = 若干 condition(匹配条件) + action(PERMIT/BLOCK) + weight(权重,高的先裁决)。多条命中时按权重和 BLOCK-override 语义仲裁。
+  - `WfpPolicy` 两种形态:
+    - `kIpBlocklist`(形态 A):对每个黑名单 IP 加一条 BLOCK(`FWPM_CONDITION_IP_REMOTE_ADDRESS` + `FWP_V4_ADDR_MASK`),其余目标放行。可选叠加 `scope_app_path`(`FWPM_CONDITION_ALE_APP_ID`)限定到只对 target 进程生效。
+    - `kBlockAppId`(形态 C):只对指定 exe 的出站连接加 BLOCK(`FWPM_CONDITION_ALE_APP_ID`)。只拦那一个进程,同机其他进程不受影响。AppID 通过 `FwpmGetAppIdFromFileName0` 把 exe 路径转 WFP 认的 blob。
+    - **为什么用黑名单而非白名单**:白名单要"默认 BLOCK-all 兜底 + 白名单 IP PERMIT 豁免",PERMIT 要确定性压过 BLOCK 涉及 CLEAR_ACTION_RIGHT / 独立 sublayer 权重等仲裁深水区(实测 PERMIT 压不住兜底 BLOCK)。黑名单只加 BLOCK filter,命中即拦、不命中即放行,行为确定。
+  - 新增 `demo/m6_demo.cc`(形态 A):`--block <ip>` 可叠加,默认黑名单 {8.8.8.8}。预期 jailbreak-7:8.8.8.8 BLOCKED / 1.1.1.1 SUCCESS / 127.0.0.1 SUCCESS。
+  - 新增 `demo/m6_appid_demo.cc`(形态 C):按 AppID 全拦 target outbound。预期 jailbreak-7 三行全 BLOCKED(含 loopback ⭐)——这是 WFP 相对 Windows Firewall 的关键优势(能拦回环)。
+  - **M6 踩坑(重要)**:
+    1. **IP 精确匹配在本机不命中**:按 `FWPM_CONDITION_IP_REMOTE_ADDRESS`(`FWP_V4_ADDR_MASK`,addr+全1掩码/32,主机序)在 ALE_AUTH_CONNECT_V4 层对 target outbound connect 实测**不命中**——UINT32/ADDR_MASK × 主机序/网络序四种组合全部装配正确(netsh 可见 8.8.8.8/32)却拦不住,netevents 零 drop。对照实验(去掉 IP 条件、无条件 BLOCK)三行全拦,证明本会话裸 BLOCK 有效,问题锁定在 IP 条件求值本身(connect 授权瞬间远程 IP 未纳入匹配/被环境仲裁短路),属 WFP 分层语义+本机环境层面,纯用户态代码改不动。同层同会话的 ALE_APP_ID 条件正常生效 → 精确按进程管控用 kBlockAppId 形态。
+    2. **需管理员权限**:改 WFP filter 要写权限(FwpmEngineOpen 要 RPC 到 BFE 服务)。非管理员得 FWP_E_* / ACCESS_DENIED。
+    3. **DYNAMIC 会话是最佳实践**:`FWPM_SESSION_FLAG_DYNAMIC` 打开 engine,句柄一关 BFE 自动清理本会话所有 filter/sublayer——进程崩了也不残留脏规则。比 INetFwPolicy2 析构手动删更稳。
+    4. WFP 是 Windows Firewall(mpssvc)的底层——mpssvc 本身建在 WFP 之上。直接对 WFP 编程 = 绕过 Firewall 那层封装/绕过它的 loopback bypass,在更底层按远程IP/端口/本地AppID 精确匹配。
+  - **M6 在沙箱里的定位**:M0~M2 是"被动配置内核机制"(内核强制执行),M3 是"target 主动请 broker 代劳",M4 是"broker 主动植入 hook",M5 是"target 自己查自己",M6 是"broker 在内核网络栈装精确 filter 管控 target 出口"——填补 M2 firewall 留下的网络管控缺口(loopback bypass + 非 AppContainer 拦不了)。jailbreak-7 从 M0~M5 一直 SUCCESS,M6 终于能精确拦下。
 
 ## 技术约定
 - 使用 `ScopedHandle` 做 HANDLE 的 RAII 管理,避免句柄泄漏。
