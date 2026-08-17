@@ -266,6 +266,73 @@ M0/M1/M2 用到的所有 `Create*` API 都对应一种 OBJECT_TYPE：
 
 真正跟"AppContainer 语义"绑定的 kernel object 是 **LowBox Token**——它是 `Token` 类型加了 `TOKEN_LOWBOX` flag 位。
 
+## 九点五、PEB 与环境块：用户态进程结构（vs EPROCESS / handle table）
+
+> 前面 § 三~九 讲的都是**内核态**结构（EPROCESS、OBJECT_HEADER、handle table 都在内核地址空间）。但进程还有一块**用户态**的核心结构——**PEB（Process Environment Block）**。M7 的 DNS 白名单通过环境变量传给 target，就落在 PEB 里，正好补这一节。
+
+### PEB 在哪、装什么
+
+```
+进程用户态地址空间（每进程独立）
+   └─ PEB (Process Environment Block)   ← 用户态！不是内核 EPROCESS
+        ├─ Ldr                          模块加载链表（LoadLibrary 挂在这）
+        ├─ ProcessParameters (RTL_USER_PROCESS_PARAMETERS)
+        │     ├─ ImagePathName / CommandLine
+        │     └─ Environment  ──────────► 环境块字符串:
+        │                                  "NAME=VALUE\0NAME=VALUE\0...\0\0"
+        ├─ BeingDebugged                 (被调试标志)
+        └─ ...堆、AppCompat、gflags 等
+```
+
+**两个容易混的"Environment"**：
+- **PEB = Process Environment Block**：进程用户态的大结构，装模块链表、启动参数、堆等，**在用户态**（`EPROCESS.Peb` 字段存的是这块用户态内存的地址）。
+- **环境块（Environment Block）**：只是 PEB 里 `ProcessParameters->Environment` 指向的那块字符串，格式 `NAME=VALUE\0...\0\0`（双 `\0` 收尾）。
+
+`GetEnvironmentVariableW` 本质就是**读自己进程 PEB 里那块字符串**，纯用户态操作、不陷入内核，所以很快。
+
+### 环境块怎么传给子进程：值拷贝，不是引用
+
+`CreateProcess`（`lpEnvironment=NULL` 时）会把**父进程当前的环境块复制一份**到子进程地址空间：
+
+```
+父进程(broker) PEB.Environment          子进程(target) PEB.Environment
+  "M7_DNS_ALLOWLIST=example.com\0.."  ── 创建瞬间复制内容 ──►  "M7_DNS_ALLOWLIST=example.com\0.."
+  （父的用户态内存）                                          （子的用户态内存，独立一份）
+```
+
+**是拷贝不是引用**，两个铁证：
+1. **地址空间隔离**：父子是两个独立虚拟地址空间，父的用户态指针在子进程里无效，不可能引用共享。
+2. **改了互不影响**：子进程 `SetEnvironmentVariable` 改自己的，父进程看不到；反之亦然。
+
+机制上：`lpEnvironment=NULL` 时 `CreateProcess` 读父环境块，经 ntdll 的 `RtlCreateProcessParameters` 组织进新进程的 `RTL_USER_PROCESS_PARAMETERS`，随新进程 PEB 一起建好。
+
+### ⭐ 时序铁律：先 SetEnv，再 CreateProcess
+
+因为拷贝发生在**创建瞬间**的快照：
+
+```
+1. broker: SetEnvironmentVariableW(M7_DNS_ALLOWLIST)  ← 改 broker 自己 PEB 的环境块
+2. broker: CreateProcess(...)                          ← 此刻把 broker 环境块【拷贝】给 target
+3. target 起来 → 它 PEB 有了那份拷贝 → 注入的 dns_hook.dll 读到
+```
+
+第 2 步之后 broker 再改自己的，已拷过去的 target 不会变（各自独立内存）。M7 的 m7_demo 顺序正是"先 Set 再 Launch"。
+
+### vs 句柄继承：两种完全不同的"进程间传递"
+
+| | 环境块 | 句柄（handle） |
+|---|---|---|
+| 传递方式 | **值拷贝**（复制字符串内容） | **拷贝句柄值 + 内核对象 PointerCount+1** |
+| 存哪 | 用户态 PEB | 内核 handle table（在 EPROCESS 里，见 § 四） |
+| 共享吗 | ❌ 各一份独立内存 | ✅ 句柄值可不同，但指向**同一个内核对象** |
+| 我们哪里用 | M7 传 DNS 白名单 | M3 `DuplicateHandle` 传管道句柄 |
+
+M3 的 `DuplicateHandle` 是"共享同一个内核 pipe 对象"（§ 四），M7 的环境变量是"复制一份字符串"——正好是进程间传递的两个典型面：**一个共享内核对象，一个值拷贝用户态数据**。
+
+### 面试话术 K6：环境块在 PEB、值拷贝、vs 句柄继承
+
+> "环境块不在内核 EPROCESS 里，它在进程**用户态的 PEB**（PEB->ProcessParameters->Environment）里，是一块 `NAME=VALUE\0...` 的字符串。`CreateProcess` 传给子进程是**值拷贝**——创建瞬间把父环境块复制一份到子进程地址空间，之后各自独立、改了互不影响。所以 M7 传 DNS 白名单必须'先 SetEnvironmentVariable 再 CreateProcess'。这跟 M3 的 `DuplicateHandle` 是两种传递机制：句柄继承是**共享同一个内核对象**（PointerCount+1），环境块是**值拷贝用户态数据**，不共享。选环境变量传白名单是因为它轻量、零改 launcher；但它对 target 自己也可见（非保密通道），传敏感策略就该走 M3 的命名管道 IPC。"
+
 ## 十、面试话术合集（内核层）
 
 ### 话术 K1：Object Manager 全景
@@ -325,3 +392,4 @@ M0/M1/M2 用到的所有 `Create*` API 都对应一种 OBJECT_TYPE：
 - "为什么 broker 挂了 target 自动死？" → § 六 KILL_ON_JOB_CLOSE 回调机制
 - "为什么 HANDLE 不能跨进程传？" → § 四 HANDLE 是索引不是指针
 - "为什么某某内核 API 需要 privilege？" → § 八 SeAccessCheck + 各类型的 `ValidAccessMask`
+- "环境变量在哪、怎么传给子进程、是引用还是拷贝？" → § 九点五 PEB 与环境块（值拷贝 vs 句柄继承） → M7.md

@@ -1,15 +1,14 @@
 @echo off
 chcp 65001 >nul
 rem =============================================================================
-rem run_m6.bat - M6 WFP network control [Form A: IP blocklist]
+rem run_m7_ip.bat - M7 [Form C: DNS->IP linked with M6 WFP]
 rem
-rem broker uses WFP to add a BLOCK for blocklisted IP (default 8.8.8.8), others
-rem pass; rule scoped to target only (does not touch whole-machine network).
+rem broker resolves allowlisted domains to IPs (shows DNS->IP->WFP link), then
+rem uses M6 WFP. WFP IP exact-match does not hit on this box (see M6.md sec 4),
+rem so it falls back to AppID form to block all target outbound; resolved IPs
+rem are printed as the linkage policy.
 rem
 rem Requires ADMIN (WFP filter needs write access). Double-click auto-elevates.
-rem
-rem NOTE: WFP IP exact-match does NOT hit on this box (see M6.md sec 4), so
-rem jailbreak-7a may still be SUCCESS. AppID form (run_m6_appid.bat) works.
 rem =============================================================================
 
 rem ---- auto elevate: relaunch as admin via PowerShell if not admin ----
@@ -27,9 +26,11 @@ set BUILD_DIR=build_m0
 set CFG=Debug
 set TARGET=%BUILD_DIR%\%CFG%\hello_target.exe
 
-echo === M6 IP blocklist: block target connecting 8.8.8.8, others pass ===
+echo === M7 DNS-IP: resolve example.com to IP + AppID fallback block ===
 rem --once: target exits after jailbreak tests (won't hang the script).
-%BUILD_DIR%\%CFG%\m6_demo.exe --block 8.8.8.8 "%TARGET%" --once
+%BUILD_DIR%\%CFG%\m7_ip_demo.exe --allow example.com "%TARGET%" --once
 echo.
-echo === m6_demo exit code = %ERRORLEVEL% ===
+echo === m7_ip_demo exit code = %ERRORLEVEL% ===
+echo [i] Form C does NOT hook DNS: jailbreak-8 two lines are SUCCESS (no resolve block).
+echo [i] jailbreak-7 three lines are BLOCKED by AppID fallback; broker log shows example.com IP.
 pause

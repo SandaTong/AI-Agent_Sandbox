@@ -1,32 +1,37 @@
 @echo off
+chcp 65001 >nul
 rem =============================================================================
-rem run_m6_appid.bat - M6 WFP 网络管控【形态 C：AppID 精确匹配】
+rem run_m6_appid.bat - M6 WFP network control [Form C: AppID exact match]
 rem
-rem broker 用 WFP 按 exe 路径(AppId) 精确拦 hello_target.exe 的全部 outbound，
-rem 只影响这一个进程，同机其他进程网络不受影响。
+rem broker uses WFP to block ALL outbound of hello_target.exe by exe path
+rem (AppId). Only this one process is affected; others are untouched.
 rem
-rem ⚠️ 必须以【管理员】运行。
+rem Requires ADMIN (WFP filter needs write access). Double-click auto-elevates.
 rem
-rem 期望现象（target 的 jailbreak-7 三行全 BLOCKED）：
-rem   [7a] 8.8.8.8   (白名单外) : BLOCKED
-rem   [7b] 1.1.1.1   (白名单内) : BLOCKED  <- AppID 形态无白名单，全拦
-rem   [7c] 127.0.0.1 (loopback) : BLOCKED  <- 连回环也拦，WFP 相对 Firewall 的关键优势
+rem Expected (target jailbreak-7 all BLOCKED):
+rem   [7a] 8.8.8.8   : BLOCKED
+rem   [7b] 1.1.1.1   : BLOCKED
+rem   [7c] 127.0.0.1 : BLOCKED  (even loopback - WFP advantage over Firewall)
 rem =============================================================================
-setlocal
 
+rem ---- auto elevate: relaunch as admin via PowerShell if not admin ----
 net session >nul 2>&1
 if %ERRORLEVEL% NEQ 0 (
-    echo [!] 需要管理员权限。请右键"以管理员身份运行"本脚本。
-    pause
-    exit /b 1
+    echo [i] Not admin, requesting elevation...
+    powershell -NoProfile -Command "Start-Process cmd.exe -ArgumentList '/k','cd /d \"%~dp0\" & \"%~f0\"' -Verb RunAs"
+    exit /b
 )
+
+setlocal
+cd /d %~dp0
 
 set BUILD_DIR=build_m0
 set CFG=Debug
 set TARGET=%BUILD_DIR%\%CFG%\hello_target.exe
 
-echo === M6 AppID 精确拦截：拦 hello_target.exe 全部 outbound（含 loopback）===
-%BUILD_DIR%\%CFG%\m6_appid_demo.exe "%TARGET%"
+echo === M6 AppID exact block: block all outbound of hello_target.exe (incl loopback) ===
+rem --once: target exits after jailbreak tests (won't hang the script).
+%BUILD_DIR%\%CFG%\m6_appid_demo.exe "%TARGET%" --once
 echo.
 echo === m6_appid_demo exit code = %ERRORLEVEL% ===
 pause

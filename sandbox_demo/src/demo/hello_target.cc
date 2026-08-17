@@ -3,14 +3,17 @@
 // -----------------------------------------------------------------------------
 // 一个"被沙箱化"的目标程序，用来对比基线 vs 沙箱下的行为差异。
 //
-// 启动时先做**5 个越狱测试**，每一项都对应一层 M0/M1 的护栏。基线运行（直
-// 接双击）时几乎全成功；M1 沙箱运行时应该全部被拦下。之后进入心跳循环。
+// 启动时先做**8 个越狱测试**，每一项都对应某个 milestone 的一层护栏。基线运行
+// （直接双击）时几乎全成功；对应 milestone 的沙箱运行时应被拦下。之后进入心跳循环。
 //
-//   测试 1：写用户桌面文件   → 拦的层：Low IL 的 NTFS mandatory label
-//   测试 2：起子进程 cmd.exe  → 拦的层：Mitigation Policy CHILD_PROCESS_RESTRICTED
-//   测试 3：申请 RWX 内存     → 拦的层：Mitigation Policy PROHIBIT_DYNAMIC_CODE
-//   测试 4：加载非签名 DLL     → 拦的层：Mitigation Policy BLOCK_NON_MICROSOFT
-//   测试 5：读剪贴板→ 拦的层：Job UI 限制 READCLIPBOARD
+//   测试 1：写用户桌面文件   → 拦的层：Low IL 的 NTFS mandatory label（M1）
+//   测试 2：起子进程 cmd.exe  → 拦的层：Mitigation Policy CHILD_PROCESS_RESTRICTED（M1）
+//   测试 3：申请 RWX 内存     → 拦的层：Mitigation Policy PROHIBIT_DYNAMIC_CODE（M1/M5）
+//   测试 4：加载非签名 DLL     → 拦的层：Mitigation Policy BLOCK_NON_MICROSOFT（M1/M5）
+//   测试 5：读剪贴板         → 拦的层：Job UI 限制 READCLIPBOARD（M1）
+//   测试 6：打开 global mutex → 拦的层：AppContainer 命名空间隔离（M2）
+//   测试 7：TCP 连公网/loopback → 拦的层：WFP filter（M6，AppID 形态含 loopback）
+//   测试 8：解析域名         → 拦的层：注入的 dns_hook.dll 钩 GetAddrInfoW 域名白名单（M7）
 // -----------------------------------------------------------------------------
 #include <windows.h>
 #include <winsock2.h>
@@ -265,6 +268,45 @@ void Test7_TryNetworkConnect() {
     ::WSACleanup();
 }
 
+// 解析一个域名，返回判定字符串。M7 的 DNS hook 拦截白名单外域名时，
+// GetAddrInfoW 会返回 WSAHOST_NOT_FOUND(11001)，解析失败即"被 DNS 管控拦下"。
+void TryResolveOne(const wchar_t* host, const wchar_t* label) {
+    ADDRINFOW hints{};
+    hints.ai_family = AF_INET;
+    hints.ai_socktype = SOCK_STREAM;
+    PADDRINFOW result = nullptr;
+    int r = ::GetAddrInfoW(host, nullptr, &hints, &result);
+    if (r == 0 && result) {
+        // 解析成功：打印第一个 IP。
+        wchar_t ip[64] = {};
+        auto* sa = reinterpret_cast<sockaddr_in*>(result->ai_addr);
+        ::InetNtopW(AF_INET, &sa->sin_addr, ip, _countof(ip));
+        std::wprintf(L"  %ls : SUCCESS (解析到 %ls，DNS 未被拦)\n", label, ip);
+        ::FreeAddrInfoW(result);
+    } else {
+        // 解析失败：WSAHOST_NOT_FOUND 多半是被 M7 的 DNS hook 拦下（白名单外）。
+        const wchar_t* hint = (r == WSAHOST_NOT_FOUND) ? L"（WSAHOST_NOT_FOUND，疑被 DNS 白名单拦）"
+                                                       : L"";
+        std::wprintf(L"  %ls : BLOCKED  (GetAddrInfoW err=%d)%ls ⭐\n", label, r, hint);
+    }
+}
+
+void Test8_ResolveDomain() {
+    // 【M7】域名维度测试：M7 的 dns_hook.dll 注入后 hook 住 GetAddrInfoW，
+    // 按域名白名单放行/拦截：
+    //   ① example.com   —— 白名单**内**：应 SUCCESS（放行，解析出 IP）
+    //   ② www.bing.com  —— 白名单**外**：应 BLOCKED（WSAHOST_NOT_FOUND）
+    // 未注入 dns_hook.dll 时（如直接双击或跑 M0~M6），两行都 SUCCESS（DNS 不受管控）。
+    WSADATA wsa{};
+    if (::WSAStartup(MAKEWORD(2, 2), &wsa) != 0) {
+        std::wprintf(L"  [jailbreak-8] DNS 测试 : BLOCKED  (WSAStartup 失败)\n");
+        return;
+    }
+    TryResolveOne(L"example.com", L"[jailbreak-8a] 解析 example.com  (白名单内)");
+    TryResolveOne(L"www.bing.com", L"[jailbreak-8b] 解析 www.bing.com (白名单外)");
+    ::WSACleanup();
+}
+
 // -----------------------------------------------------------------------------
 BOOL WINAPI CtrlHandler(DWORD type) {
     if (type == CTRL_C_EVENT || type == CTRL_BREAK_EVENT || type == CTRL_CLOSE_EVENT) {
@@ -377,14 +419,19 @@ void RunSelfCheckDemo(sandbox::SelfDefense& sd) {
 }  // namespace
 
 int wmain(int argc, wchar_t** argv) {
-    // 解析参数：--ipc 跑 M3 IPC 演示；--selfcheck 跑 M5 运行时自检。
+    // 解析参数：--ipc 跑 M3 IPC 演示；--selfcheck 跑 M5 运行时自检；
+    //          --once 跑完越狱测试即退出（不进心跳循环）——方便 M6/M7 这类
+    //          "跑完看结果"的 demo，脚本能顺畅回到 pause，不会被常驻 target 卡住。
     bool run_ipc = false;
     bool run_selfcheck = false;
+    bool run_once = false;
     for (int i = 1; i < argc; ++i) {
         if (wcscmp(argv[i], L"--ipc") == 0)
             run_ipc = true;
         else if (wcscmp(argv[i], L"--selfcheck") == 0)
             run_selfcheck = true;
+        else if (wcscmp(argv[i], L"--once") == 0)
+            run_once = true;
     }
 
     // ---- stdio初始化 ----
@@ -437,6 +484,7 @@ int wmain(int argc, wchar_t** argv) {
     Test5_ReadClipboard();
     Test6_OpenGlobalNamedObject();
     Test7_TryNetworkConnect();
+    Test8_ResolveDomain();
     std::wprintf(L"[target] === 越狱测试结束 ===\n\n");
 
     // 【M3】可选：跑 IPC 客户端演示（委托 broker 代劳打开文件）。
@@ -447,6 +495,15 @@ int wmain(int argc, wchar_t** argv) {
     // 【M5】可选：跑运行时自检（检测启动以来有没有被注入 / 被 inline hook）。
     if (run_selfcheck) {
         RunSelfCheckDemo(self_defense);
+    }
+
+    // --once：跑完越狱测试就退出，不进心跳循环。用于 M6/M7 这类"跑完看结果"的
+    // demo——否则 target 常驻，broker 的 WaitForExit 永久等，脚本卡在 exe 那行、
+    // 到不了 pause，表现为"一闪而过/看不到结果"。
+    if (run_once) {
+        std::wprintf(L"[target] --once：越狱测试完成，退出。\n");
+        std::fflush(stdout);
+        return 0;
     }
 
     std::wprintf(L"[target] 每 2 秒发一次心跳。按 Ctrl+C 或关闭窗口即可退出。\n");

@@ -124,6 +124,24 @@ target_link_libraries(m6_demo PRIVATE sandbox_core)
 add_executable(m6_appid_demo src/demo/m6_appid_demo.cc)
 target_link_libraries(m6_appid_demo PRIVATE sandbox_core)
 
+# ----- M7 演示程序（DNS 域名维度管控） -------------------------------------
+# 形态 A：DNS 域名白名单 Hook（注入 dns_hook.dll，hook GetAddrInfoW）
+add_executable(m7_demo src/demo/m7_demo.cc)
+target_link_libraries(m7_demo PRIVATE sandbox_core)
+# 形态 C：DNS->IP 联动 M6 WFP（broker 侧解析域名拿 IP + AppID 兜底）
+add_executable(m7_ip_demo src/demo/m7_ip_demo.cc)
+target_link_libraries(m7_ip_demo PRIVATE sandbox_core ws2_32.lib)
+
+# ----- dns_hook.dll：M7 注入进 target 的域名管控垫片（MinHook 钩 GetAddrInfoW）--
+# 和 sandbox_hook.dll 同款配置：静态 CRT + 链接 minhook。
+add_library(dns_hook SHARED src/demo/dns_hook.cc)
+target_link_libraries(dns_hook PRIVATE minhook user32.lib ws2_32.lib)
+set_target_properties(dns_hook PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/$<CONFIG>"
+    LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/$<CONFIG>")
+set_property(TARGET dns_hook PROPERTY
+    MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+
 # ----- sandbox_hook.dll：被注入进 target 的拦截垫片（MinHook 钩 CreateFileW）--
 # 静态链接 CRT，保持和 hello_target 一致（避免注入后依赖非签名 debug CRT）。
 # 链接 minhook静态库（vendored）。
@@ -182,6 +200,9 @@ set_target_properties(m4_demo       PROPERTIES FOLDER "demo")
 set_target_properties(m5_demo       PROPERTIES FOLDER "demo")
 set_target_properties(m6_demo       PROPERTIES FOLDER "demo")
 set_target_properties(m6_appid_demo PROPERTIES FOLDER "demo")
+set_target_properties(m7_demo       PROPERTIES FOLDER "demo")
+set_target_properties(m7_ip_demo    PROPERTIES FOLDER "demo")
+set_target_properties(dns_hook      PROPERTIES FOLDER "demo")
 set_target_properties(sandbox_hook  PROPERTIES FOLDER "demo")
 set_target_properties(hello_target  PROPERTIES FOLDER "demo")
 set_target_properties(unsigned_probe PROPERTIES FOLDER "demo")

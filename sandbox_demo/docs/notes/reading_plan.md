@@ -31,7 +31,7 @@
 
 ---
 
-## 📍 当前进度（截至 M6）
+## 📍 当前进度（截至 M7）
 
 ```
 Day 1     M0 ✅  Job + Restricted Token
@@ -40,14 +40,14 @@ Day 4-5   M2 ✅  AppContainer + LowBox + INetFwPolicy2加餐（踩 5 个坑）
 Day 6     M3 ✅  Broker/Target Named-Pipe IPC（DuplicateHandle + 管道 SDDL 双门坑）
 Day 7-8   M4 ✅  DLL 注入 + API Hook（MinHook；注入垫片继承 target 权限不提权坑）
 Day 9     M5 ✅  反注入 + 运行时检测（内核 mitigation + 用户态自检；用 M4 injector 攻防对照）
-Day 10-12 M6 ✅  WFP 用户态网络管控（AppID 形态拦 loopback，还清 M2 § 九的债；IP 精确匹配实测本机不命中）  ← 你在这里
-Day 13    M7 ⏳  DNS 域名维度  ← 下一站
-Day 14-15 M8 ⏳  用户态文件 Broker（复用 M3 的 IPC + DuplicateHandle 骨架）
+Day 10-12 M6 ✅  WFP 用户态网络管控（AppID 形态拦 loopback，还清 M2 § 九的债；IP 精确匹配实测本机不命中）
+Day 13    M7 ✅  DNS 域名维度（注入 dns_hook.dll 钩 GetAddrInfoW 做域名白名单；DNS→IP 联动 WFP）  ← 你在这里
+Day 14-15 M8 ⏳  用户态文件 Broker（复用 M3 的 IPC + DuplicateHandle 骨架）  ← 下一站
 Day 16-18 M9 ⏳  内核 Minifilter 驱动（W2 皇冠）
 Day 19-20 M10-11 ⏳ 测试 + 打包
 ```
 
-**已完成 7 个 milestone（M0~M6）**。M4（攻：注入+hook）和 M5（守：反注入）互为镜像，用同一套 injector 做了攻防对照。M6 转向网络管控（WFP）：AppID 形态成功拦下 target 全部 outbound（含 loopback，还清 M2 § 九的债）；按远程 IP 精确匹配实测本机纯用户态该层不命中（详见 M6.md § 四）。下一站 M7 DNS 域名维度。
+**已完成 8 个 milestone（M0~M7）**。M4（攻：注入+hook）和 M5（守：反注入）互为镜像。M6 网络管控（WFP）按进程/IP 拦 outbound。M7 把网络管控升到域名维度——复用 M4 注入骨架，把 hook 点从 CreateFileW 换成 GetAddrInfoW，做域名白名单（form A 完全成功：白名单外域名解析返回 WSAHOST_NOT_FOUND），并演示 DNS→IP→WFP 联动纵深（form C）。下一站 M8 用户态文件 Broker。
 
 ---
 
@@ -239,13 +239,19 @@ Mandatory Label 段落尤其关键——你会看到 `SECURITY_MANDATORY_LOW_RID
 
 ---
 
-### ⏳ M7 — DNS 域名维度
+### ✅ M7（已完成）— DNS 域名维度
 
-**代码将用到**：`DnsQuery_A` hook 或旁路 DNS 服务器
+**代码用到**：MinHook 钩 `ws2_32!GetAddrInfoW`（复用 M4 注入骨架）、环境变量传白名单、M6 WFP 联动
 
 **外部资源**：
 - MSDN DNS API 页
 - WFP 4.0 后的 `FWPM_LAYER_ALE_RESOURCE_ASSIGNMENT_V4` 也能间接控 DNS
+
+**M7 实测硬结论（写进 M7.md）**：
+- **形态 A（域名白名单 hook）完全成功**：注入 `dns_hook.dll` 钩 `GetAddrInfoW`，白名单内 `example.com` 放行（解析到 IP）、白名单外 `www.bing.com` 被拦（`GetAddrInfoW err=11001` = `WSAHOST_NOT_FOUND`）。一次命中，说明 `GetAddrInfoW` 就是 target 解析入口。
+- **为什么 hook 而非 WFP 拦 :53**：解析走进程外 dnscache 服务，WFP 在 :53 看到的源是 svchost 区分不了进程；进程内 hook 才能拿明文域名 + 区分进程 + 挡 DoH。
+- **白名单传递零改 core**：`SetEnvironmentVariableW` + 子进程继承环境块，注入的 DLL 在 DllMain 读。
+- **形态 C（DNS→IP 联动 WFP）**：broker 侧解析域名拿"域名→IP"，演示 A(hostname 维度)+IP 维度纵深；C 的 IP 白名单部分继承 M6"IP 不命中"坑，用 AppID 兜底，真正落地需内核 callout。
 
 ---
 
@@ -315,6 +321,7 @@ Mandatory Label 段落尤其关键——你会看到 `SECURITY_MANDATORY_LOW_RID
 ## 📎 备查清单（放手边）
 
 工程内文档：
+- **`docs/notes/why_sandbox_for_agent.md`** ⭐ — **工程动机总纲**：这套 Job/Token/IL/Mitigation/WFP/文件Broker 到底解决 AI Agent 的什么真实风险（模型失控/prompt注入/供应链投毒）、每个 milestone 对应的 agent 场景、五层围栏全景、工业级参照（Chromium sandbox / OpenAI Code Interpreter / EDR）、面试项目背景口径。**讲项目先看这篇**
 - `docs/notes/M0.md` — 已写，含 3 个硬伤修复的完整叙述
 - `docs/notes/M1.md` — M1 完整笔记 + 7 章 + 4 个 0xC0000142 坑 + 4 条金牌话术
 - `docs/notes/M2.md` — M2 完整笔记 + 12 章 + Firewall 加餐 + 6 条金牌话术
@@ -323,6 +330,7 @@ Mandatory Label 段落尤其关键——你会看到 `SECURITY_MANDATORY_LOW_RID
 - `docs/notes/M4_appendix.md` — M4 附加深挖：Inline Hook vs OC Swizzling 对比 + jmp 改写调用时序/trampoline + kernel32 共享基址/ASLR开机随机一次 + PE 装载/导入表·导出表·IAT/静态vs动态调用（注入与 hook 的底层地基）
 - `docs/notes/M5.md` — M5 完整笔记 + 反注入双层（内核 mitigation + 用户态 self_defense）+ LdrRegisterDllNotification/远程线程扫描/API inline-hook 自检 + 用 M4 injector 攻防对照（防御ON注入被挡/OFF得手）+ 5 条金牌话术
 - `docs/notes/M6.md` — M6 完整笔记 + WFP 原理（vs Firewall / 用户态 filter vs 内核 callout）+ DYNAMIC 会话 + 两种形态（AppID 精确拦成功含 loopback / IP 黑名单）+ ⭐IP 精确匹配踩坑全记录（6 行证伪表 + M6_BLOCK_ALL 终极对照 + 根因 + netsh 显示陷阱 + exe 时间戳编译陷阱）+ 面试三连问
+- `docs/notes/M7.md` — M7 完整笔记 + DNS 解析真实链路（薄壳 + 进程外 dnscache）+ 三路线选型对比表 + 形态 A（hook GetAddrInfoW 域名白名单，实测 www.bing.com 被 WSAHOST_NOT_FOUND 拦）+ 白名单环境变量传递 + 形态 C（DNS→IP→WFP 联动纵深）+ 与 M4/M6 复用图谱 + 面试三连问
 - **`docs/notes/kernel_objects_101.md`** ⭐ — **横切基础**：Object Manager / OBJECT_TYPE / HANDLE 表 / SeAccessCheck / KILL_ON_JOB_CLOSE 回调 / AppContainer 命名空间前缀劫持。所有 milestone 遇到"内核里到底怎么实现的"这类问题先来这里查
 - **`docs/notes/tools_cheatsheet.md`** ⭐ — **工具速查表**：Process Explorer / WinObj / ProcMon / dumpbin / WinDbg / wf.msc 等所有沙箱开发调试常用工具，按用途分类 + 每个工具"什么时候用它 + 对应我们代码哪个场景"
 - `README.md` — 工程总览 + JD 关键词映射

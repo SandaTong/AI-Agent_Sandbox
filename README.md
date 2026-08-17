@@ -82,12 +82,12 @@
 |---|---|---|---|---|
 | D1 | **M0** 基础闭环 | Job / Token / CREATE_SUSPENDED 三步舞 | W1 | ✅ 完成 |
 | D2-3 | **M1** 进程加固 | Low IL + STARTUPINFOEX + 8 项 Mitigation Policy + Alternate Desktop | W1 | ✅ 完成 |
-| D4-5 | **M2** 现代沙箱 | AppContainer / LowBox Token + Capability SID | W1 | ⏳ 待开工 |
-| D6 | **M3** Broker/Target 双进程 + Named-Pipe IPC | 拆成 `broker.exe` + `target.exe` | W1/W5 | ⏳ |
-| D7-8 | **M4** 注入与 Hook（正向） | `injector.exe` + MinHook 拦截 `CreateFileW` | W4 | ⏳ |
-| D9 | **M5** 反注入与运行时检测 | `LdrRegisterDllNotification` + 模块白名单 + 远程线程检测 | W4 | ⏳ |
+| D4-5 | **M2** 现代沙箱 | AppContainer / LowBox Token + Capability SID | W1 | ✅ 完成 |
+| D6 | **M3** Broker/Target 双进程 + Named-Pipe IPC | 拆成 `broker.exe` + `target.exe` | W1/W5 | ✅ 完成 |
+| D7-8 | **M4** 注入与 Hook（正向） | `injector.exe` + MinHook 拦截 `CreateFileW` | W4 | ✅ 完成 |
+| D9 | **M5** 反注入与运行时检测 | `LdrRegisterDllNotification` + 模块白名单 + 远程线程检测 | W4 | ✅ 完成 |
 | D10-12 | **M6** WFP 网络管控 | 用户态 WFP：进程 + IP + 端口 + 协议 白/黑名单 | W3 | ✅ |
-| D13 | **M7** 域名维度控制 | DNS 层Hook 或旁路 DNS 服务器 | W3 | ⏳ |
+| D13 | **M7** 域名维度控制 | 注入 dns_hook.dll 钩 GetAddrInfoW 做域名白名单 + DNS→IP 联动 WFP | W3 | ✅ |
 | D14-15 | **M8** 用户态文件隔离 | Broker 代理受限文件访问 + NTFS ACL 收敛 | W2 | ⏳ |
 | D16-18 | **M9** 内核 Minifilter | `sandbox_flt.sys` PreCreate 按PID + 路径拦截 | W2 | ⏳ |
 | D19 | **M10** 越狱测试套件 | 8~10 个 attacker exe 验证每层防御 | 全部 | ⏳ |
@@ -411,7 +411,32 @@ M4 为了能注入，特意关掉 `PROHIBIT_DYNAMIC_CODE` / `BLOCK_NON_MICROSOFT
 
 **运行**（需管理员权限）：`run_m6_appid.bat`（AppID 形态，三行应全 BLOCKED）/ `run_m6.bat`（IP 黑名单，本机 IP 条件不命中）。
 
-### ⏳ M7 及以后 — 见 Roadmap 表
+### ✅ M7 — DNS 域名维度管控（网络管控从 IP 升到域名）
+
+M6 的 WFP 只看得到 IP，看不到域名。agent 场景真正想说的是"只准连 `api.openai.com`"——域名管控必须在 **DNS 解析环节**做。M7 复用 M4 的注入 + MinHook 骨架，把 hook 点从 `CreateFileW` 换成 **`ws2_32!GetAddrInfoW`**，做域名白名单。
+
+```
+m7_demo → 注入 dns_hook.dll → 在 target 内 hook GetAddrInfoW
+  · 白名单内域名 → 放行（正常解析出 IP）
+  · 白名单外域名 → 返回 WSAHOST_NOT_FOUND（拿不到 IP，连不上）
+```
+
+**为什么 hook 而非 WFP 拦 :53**：域名解析走进程外 dnscache 服务，WFP 在 :53 报文看到的源是 svchost 而非 target，区分不了进程；进程内 hook 才能拿明文域名 + 区分进程 + 挡 DoH。
+
+**两种形态**：
+
+| 形态 | demo | 做法 | 实测 |
+|---|---|---|---|
+| **A 域名白名单 Hook** ⭐ | `m7_demo` + `dns_hook.dll` | 进程内 hook `GetAddrInfoW` | ✅ `example.com`(白名单内)放行、`www.bing.com`(白名单外)被 `WSAHOST_NOT_FOUND`(11001) 拦 |
+| C DNS→IP 联动 WFP | `m7_ip_demo` | broker 解析域名拿 IP + M6 WFP | 演示 hostname+IP 纵深；IP 白名单部分继承 M6"IP 不命中"坑，用 AppID 兜底 |
+
+**白名单传递零改 core**：broker `SetEnvironmentVariableW(M7_DNS_ALLOWLIST)`，子进程继承环境块，注入的 DLL 在 DllMain 读。
+
+详见 [`docs/notes/M7.md`](sandbox_demo/docs/notes/M7.md)。
+
+**运行**：`run_m7.bat`（形态 A，看 target 的 jailbreak-8 两行 + DebugView/`%TEMP%\dns_hook_log.txt`）/ `run_m7_ip.bat`（形态 C，需管理员）。
+
+### ⏳ M8 及以后 — 见 Roadmap 表
 
 ---
 
