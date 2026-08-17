@@ -1,8 +1,8 @@
 # 项目记忆 — sandbox_demo (Windows 沙箱)
 
 ## 项目目标
-基于 Windows 安全机制实现一个进程沙箱。当前已推进到 M6(WFP 用户态网络管控层,还 M2 留下的网络债)。
-M0~M6 路线图全部完成。
+基于 Windows 安全机制实现一个进程沙箱。当前已推进到 M7(DNS 域名维度网络管控,M4 hook 思路 + M6 WFP 联动)。
+M0~M7 路线图全部完成。
 
 ## M0 架构(双支柱 + 三步舞)
 - **支柱一 TokenManager**(`core/token_manager.cc`):`CreateRestrictedToken(DISABLE_MAX_PRIVILEGE)`
@@ -145,6 +145,26 @@ M0~M6 路线图全部完成。
     3. **DYNAMIC 会话是最佳实践**:`FWPM_SESSION_FLAG_DYNAMIC` 打开 engine,句柄一关 BFE 自动清理本会话所有 filter/sublayer——进程崩了也不残留脏规则。比 INetFwPolicy2 析构手动删更稳。
     4. WFP 是 Windows Firewall(mpssvc)的底层——mpssvc 本身建在 WFP 之上。直接对 WFP 编程 = 绕过 Firewall 那层封装/绕过它的 loopback bypass,在更底层按远程IP/端口/本地AppID 精确匹配。
   - **M6 在沙箱里的定位**:M0~M2 是"被动配置内核机制"(内核强制执行),M3 是"target 主动请 broker 代劳",M4 是"broker 主动植入 hook",M5 是"target 自己查自己",M6 是"broker 在内核网络栈装精确 filter 管控 target 出口"——填补 M2 firewall 留下的网络管控缺口(loopback bypass + 非 AppContainer 拦不了)。jailbreak-7 从 M0~M5 一直 SUCCESS,M6 终于能精确拦下。
+- M7: ~~DNS 域名维度网络管控(M4 hook 思路 + M6 WFP 联动)。~~ 已完成。
+  - **M7 要解决什么——网络管控从 IP 维度升到域名维度**:M6 的 WFP 只能按 IP 拦(内核网络栈看不到域名——域名早在 DNS 解析阶段就变成 IP 了)。但 agent 场景想说的是"只准连 api.openai.com,别的域名一律拒"。域名管控必须在 **DNS 解析这一环** 动手。
+  - **为什么用 API Hook 而不是 WFP 拦 :53**(核心洞察):getaddrinfo/GetAddrInfoW 这类解析 API 在进程内是薄壳,真正解析甩给进程外的 DNS Client 服务(dnscache/svchost)。所以 WFP 在 :53 报文上看到的源进程是 svchost 而非 target,按进程根本区分不出"是哪个 agent 要解析"。而在 target 进程内 hook 解析 API,能**直接拿到明文域名**、天然区分进程、还挡得住 DoH(DoH 也要先调 GetAddrInfoW 拿 hostname)。这是域名管控的正确抽象层。
+  - **没有新增 core 文件**:M7 复用 M4 injector + M6 wfp_filter + M0~M2 Job/Token/Mitigation,新增的全在 demo 下。
+  - 新增 `demo/dns_hook.cc` → `dns_hook.dll`:域名管控垫片 DLL,被 broker 注入进 target。复用 M4 sandbox_hook.dll 的注入+日志双通道+MinHook 装钩做法,只是把 hook 目标从 `kernel32!CreateFileW` 换成 `ws2_32!GetAddrInfoW`(域名解析主入口,getaddrinfo / Python socket / Node dns 最终都落到它)。
+    - 白名单通过环境变量 `M7_DNS_ALLOWLIST` 传给 target(分号分隔,支持 `*.` 通配)。broker 用 `SetEnvironmentVariableW` 设好,`CreateProcessAsUserW(lpEnvironment=null)` 让 target 继承,DLL 在 DllMain 里读一次。
+    - 匹配规则:完全相等 / `*.example.com` 匹配子域 / 裸域 `example.com` 隐式匹配子域。命中白名单放行(调原函数),未命中返回 `WSAHOST_NOT_FOUND`(11001,相当于"该域名不存在",target 拿不到 IP → 连不上)。
+    - 日志双通道:`OutputDebugStringW` + `%TEMP%\dns_hook_log.txt`(复用 M4 模式,钩子内最稳)。
+  - 新增 `demo/m7_demo.cc`(**形态 A:DNS 域名白名单 Hook**):broker 注入 dns_hook.dll(挂起→注入→resume,复用 M4 骨架)。`--allow <domain>` 可叠加,默认白名单 {example.com}。预期 jailbreak-8:example.com SUCCESS(放行) / www.bing.com BLOCKED(WSAHOST_NOT_FOUND)⭐。不叠加 AppContainer(注入需 broker 对 target 有 VM/线程权限)。mitigation 关掉 strict_signed_dll + prohibit_dynamic_code(同 M4,否则拦注入)。
+  - 新增 `demo/m7_ip_demo.cc`(**形态 C:DNS→IP 联动 M6 WFP**):broker 侧**自己先解析**白名单域名(`GetAddrInfoW`)拿到"域名→IP 集合",交给 M6 WFP filter 实现"只有白名单域名解析出的 IP 才允许连"。演示"域名→IP→WFP"的联动架构。
+    - **为什么要有 C:纵深防御**:形态 A 的弱点是——agent 若直接用 IP 连(不解析域名)就绕过了 hook。形态 C 在 IP 维度补一道:即使绕过域名解析,非白名单 IP 也连不上。A(hostname 维度)+ C(IP 维度)两道关叠加 = 纵深防御。
+    - **继承 M6 已知限制**:C 依赖 WFP 按 IP 精确匹配放行/拦截,而 M6 实测本机纯用户态 ALE_AUTH_CONNECT_V4 层 IP 条件不命中。所以本 demo 同时用 M6 的 AppID 形态兜底(按 exe 精确禁网),把"域名→IP 解析结果"作为策略信息打印展示联动链路。真正落地需内核态 callout。
+  - `demo/hello_target.cc` 接入 M7:新增 `Test8_ResolveDomain`(jailbreak-8a 解析 example.com 白名单内 / 8b 解析 www.bing.com 白名单外)。
+  - **M7 踩坑/要点**:
+    1. DNS 解析走进程外 dnscache 服务 → WFP 在 :53 看到的源是 svchost 不是 target,按进程区分不了 → 必须进程内 hook 才能拿明文域名 + 区分进程 + 挡 DoH。
+    2. hook 目标选 `ws2_32!GetAddrInfoW`(现代域名解析主入口),不是已废弃的 `gethostbyname`。getaddrinfo/Python socket/Node dns 最终都落到它。
+    3. 白名单用环境变量传递(非 IPC):简单、子进程天然继承、DLL DllMain 里读一次即可。生产可改 IPC 下发动态更新。
+    4. 拒绝解析返回 `WSAHOST_NOT_FOUND` 而非 `EAI_FAIL`:前者语义是"域名不存在",target 拿不到 IP 自然连不上;比直接拦 connect 更早、更干净。
+    5. 形态 C 的 IP 联动在本机受 M6 IP 不命中限制 → 用 AppID 兜底保证沙箱语义,真实产品需内核 callout 做 IP 白名单。
+  - **M7 在沙箱里的定位**:M6 是"IP 维度网络管控"(内核网络栈),M7 是"域名维度网络管控"(进程内 hook)+ "DNS→IP→WFP 联动纵深防御"。M6 看不到域名(早在 DNS 解析就变 IP 了),M7 在 DNS 解析这一环补上域名维度。两者叠加 = hostname + IP 双维度网络沙箱。
 
 ## 技术约定
 - 使用 `ScopedHandle` 做 HANDLE 的 RAII 管理,避免句柄泄漏。

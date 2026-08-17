@@ -328,6 +328,7 @@ Mandatory Label 段落尤其关键——你会看到 `SECURITY_MANDATORY_LOW_RID
 - `docs/notes/M3.md` — M3 完整笔记 + Broker/Target IPC + DuplicateHandle + 管道 SDDL 双门坑 + 4 条金牌话术
 - `docs/notes/M4.md` — M4 完整笔记 + 注入四件套 + MinHook Inline Hook + "注入垫片继承 target 权限不提权"坑 + 5 条金牌话术
 - `docs/notes/M4_appendix.md` — M4 附加深挖：Inline Hook vs OC Swizzling 对比 + jmp 改写调用时序/trampoline + kernel32 共享基址/ASLR开机随机一次 + PE 装载/导入表·导出表·IAT/静态vs动态调用（注入与 hook 的底层地基）
+- `docs/notes/minhook_trampoline_deepdive.md` ⭐ — MinHook inline hook 底层深挖：relay/trampoline/detour 四角色 + hook 前后内存布局图 + 安装/调用两张时序图 + 为什么 x64 需 relay + 为什么调原函数名会无限递归（必须调 trampoline）+ 逐句验证。追问"蹦床是什么/怎么调回原函数"来这篇
 - `docs/notes/M5.md` — M5 完整笔记 + 反注入双层（内核 mitigation + 用户态 self_defense）+ LdrRegisterDllNotification/远程线程扫描/API inline-hook 自检 + 用 M4 injector 攻防对照（防御ON注入被挡/OFF得手）+ 5 条金牌话术
 - `docs/notes/M6.md` — M6 完整笔记 + WFP 原理（vs Firewall / 用户态 filter vs 内核 callout）+ DYNAMIC 会话 + 两种形态（AppID 精确拦成功含 loopback / IP 黑名单）+ ⭐IP 精确匹配踩坑全记录（6 行证伪表 + M6_BLOCK_ALL 终极对照 + 根因 + netsh 显示陷阱 + exe 时间戳编译陷阱）+ 面试三连问
 - `docs/notes/M7.md` — M7 完整笔记 + DNS 解析真实链路（薄壳 + 进程外 dnscache）+ 三路线选型对比表 + 形态 A（hook GetAddrInfoW 域名白名单，实测 www.bing.com 被 WSAHOST_NOT_FOUND 拦）+ 白名单环境变量传递 + 形态 C（DNS→IP→WFP 联动纵深）+ 与 M4/M6 复用图谱 + 面试三连问
