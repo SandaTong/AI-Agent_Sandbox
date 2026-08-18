@@ -118,6 +118,14 @@ std::error_code PipeClient::Ping() {
 
 std::error_code PipeClient::RequestOpenFile(const std::wstring& path, HANDLE& out_handle,
                                             ipc::ResultCode& out_result) {
+    // M3 兼容语义：只读 + 打开已存在。转调 M8 完整版。
+    return RequestOpenFileEx(path, ipc::AccessMode::kRead, ipc::Disposition::kOpenExisting,
+                             out_handle, out_result);
+}
+
+std::error_code PipeClient::RequestOpenFileEx(const std::wstring& path, ipc::AccessMode access,
+                                              ipc::Disposition disposition, HANDLE& out_handle,
+                                              ipc::ResultCode& out_result) {
     out_handle = nullptr;
     out_result = ipc::ResultCode::kInternalError;
 
@@ -126,19 +134,22 @@ std::error_code PipeClient::RequestOpenFile(const std::wstring& path, HANDLE& ou
     if (path.empty() || path.size() > ipc::kMaxPathChars)
         return MakeWinError(ERROR_INVALID_PARAMETER);
 
-    // ---- 组请求消息：头 + OpenFileRequest + 路径(wchar_t[]) ----
+    // ---- 组请求消息：头 + OpenFileRequest(v2: path_chars+access+dispo) + 路径 ----
     const uint32_t path_chars = static_cast<uint32_t>(path.size());
-    const uint32_t payload_size = sizeof(ipc::OpenFileRequest) + path_chars * sizeof(wchar_t);
+    const uint32_t payload_size =
+        sizeof(ipc::OpenFileRequest) + path_chars * sizeof(wchar_t);
 
     std::vector<uint8_t> out(sizeof(ipc::MsgHeader) + payload_size);
     auto* h = reinterpret_cast<ipc::MsgHeader*>(out.data());
     h->magic = ipc::kProtocolMagic;
-    h->version = ipc::kProtocolVersion;
+    h->version = ipc::kProtocolVersion;  // v2
     h->type = static_cast<uint32_t>(ipc::MsgType::kOpenFileRequest);
     h->payload_size = payload_size;
 
     auto* body = reinterpret_cast<ipc::OpenFileRequest*>(out.data() + sizeof(ipc::MsgHeader));
     body->path_chars = path_chars;
+    body->access_mode = static_cast<uint32_t>(access);
+    body->disposition = static_cast<uint32_t>(disposition);
     std::memcpy(out.data() + sizeof(ipc::MsgHeader) + sizeof(ipc::OpenFileRequest), path.data(),
                 path_chars * sizeof(wchar_t));
 

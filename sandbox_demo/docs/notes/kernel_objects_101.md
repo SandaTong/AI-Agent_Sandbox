@@ -333,6 +333,53 @@ M3 的 `DuplicateHandle` 是"共享同一个内核 pipe 对象"（§ 四），M7
 
 > "环境块不在内核 EPROCESS 里，它在进程**用户态的 PEB**（PEB->ProcessParameters->Environment）里，是一块 `NAME=VALUE\0...` 的字符串。`CreateProcess` 传给子进程是**值拷贝**——创建瞬间把父环境块复制一份到子进程地址空间，之后各自独立、改了互不影响。所以 M7 传 DNS 白名单必须'先 SetEnvironmentVariable 再 CreateProcess'。这跟 M3 的 `DuplicateHandle` 是两种传递机制：句柄继承是**共享同一个内核对象**（PointerCount+1），环境块是**值拷贝用户态数据**，不共享。选环境变量传白名单是因为它轻量、零改 launcher；但它对 target 自己也可见（非保密通道），传敏感策略就该走 M3 的命名管道 IPC。"
 
+## 九点六、命名管道：客户端"连接"就是一次 CreateFile + 一堆坑
+
+> M3 的 Broker/Target IPC、M8 的文件 Broker 都建在命名管道上。这一节回答一个高频疑问——**"client 连 server 的管道只要一个 `CreateFile` 吗？"**——并把命名管道实际会踩的坑集中记下来。前置：`core/pipe_client.cc` / `pipe_server.cc`。
+
+### 为什么"连接"就是 `CreateFileW`
+
+命名管道 `\\.\pipe\<name>` 由 **`npfs.sys`（命名管道文件系统）** 承载，在对象管理器里就是 **File 类型对象**（走 § 九表里的 `IoFileObjectType` + `IopParseDevice` 名字解析）。所以命名管道**复用了整套文件对象模型**：客户端不需要专门的 connect API——
+
+- 服务端 `CreateNamedPipeW` 建管道实例（监听态）；
+- 客户端 `CreateFileW(\\.\pipe\name, ..., OPEN_EXISTING, ...)` 打开它，内核在 open 时把这次打开和一个监听态实例**配对**，服务端 `ConnectNamedPipe` 随即返回。
+
+**open 成功 = 连接建立**。这正是命名管道相对 socket 的便利：`ReadFile`/`WriteFile`/`CloseHandle`/`DuplicateHandle` 全套文件 I/O 语义直接可用，不用另学连接 API。
+
+### 但"健壮的连接"= CreateFile 只是第 1 步（共四件事）
+
+`pipe_client.cc::Connect` 真实做了四件事，缺一不可：
+
+1. **`CreateFileW`** — `dwCreationDisposition` 必须 `OPEN_EXISTING`（管道是服务端建的，客户端只"打开已存在"，**绝不能 CREATE_\***）；`dwDesiredAccess` 按管道方向给（双工用 `GENERIC_READ|GENERIC_WRITE`）。
+2. **`SetNamedPipeHandleState(PIPE_READMODE_MESSAGE)`** — 服务端用了 `PIPE_TYPE_MESSAGE`，但客户端 open 后**默认是字节流读模式**，必须显式切消息读模式，两端才对齐。漏了会出"一次 ReadFile 读半条/多条消息"的诡异粘包 bug。
+3. **`WaitNamedPipeW` + 重试** — 管道实例可能暂时不可用（见下面坑表），要按错误码重试。
+4. **按错误码判定语义** — 尤其 `ERROR_ACCESS_DENIED` 是"沙箱 IPC 授权未生效"的证据，不重试直接失败。
+
+一句话：**连接的动作是 `CreateFileW`，但健壮的连接还要配消息模式对齐 + 重试 + 错误码判定**。
+
+### ⭐ 命名管道使用坑清单
+
+| # | 坑 | 现象 | 正确做法 |
+|---|---|---|---|
+| P1 | **消息模式不对齐** | 服务端 `PIPE_TYPE_MESSAGE`，客户端不 `SetNamedPipeHandleState(PIPE_READMODE_MESSAGE)` → 一次 ReadFile 读到半条/多条 | 客户端 open 后立刻切消息读模式（`pipe_client.cc` 第 56 行） |
+| P2 | **`ERROR_PIPE_BUSY`（实例满）** | 服务端 `nMaxInstances` 有限，实例都被占 → `CreateFileW` 直接失败 | 用 `WaitNamedPipeW(name, timeout)` 等一个空闲实例再重试，不是死等 |
+| P3 | **`ERROR_FILE_NOT_FOUND`（管道还没建）** | 客户端比服务端先跑，管道尚未 `CreateNamedPipeW` | 短 sleep 后重试（有 deadline 上限，别无限等） |
+| P4 | **`ERROR_ACCESS_DENIED`（SD 没授权）** | AppContainer/Low IL target 连不上 | **不重试**，直接失败——这正是沙箱 IPC 授权生效的证据；解法在服务端给管道 SD 加对应 Package SID / 降 mandatory label（M3 § pipe_server） |
+| P5 | **`ConnectNamedPipe` 返回 FALSE 但已连上** | 客户端在服务端调 `ConnectNamedPipe` 之前就 open 了 | 服务端把 `gle==ERROR_PIPE_CONNECTED` 也当成功（`pipe_server.cc::WaitForClient`） |
+| P6 | **`payload_size` 声明 vs 实际不符** | 不可信 target 声明大 payload 只发一点，或反之 | 服务端收到后校验 `实际字节数 == sizeof(头)+payload_size`，不自洽就丢（`ServeOneRequest`） |
+| P7 | **一实例只服务一个客户端** | `nMaxInstances=1` 时第二个 target 连不上 | 单 target 场景够用；多并发需多实例 + IOCP/线程池（M3 未做，留优化） |
+| P8 | **同步阻塞 ReadFile 卡死 broker** | 单线程同步收发，一个慢客户端拖住整个 broker | demo 单 target 可接受；生产用 Overlapped I/O + IOCP（Richter Ch 10） |
+| P9 | **对端断开当异常处理** | target 跑完退出，broker `ReadFile` 得 `ERROR_BROKEN_PIPE` | 把 `BROKEN_PIPE`/`PIPE_NOT_CONNECTED` 当**正常结束信号**，退服务循环而非报错 |
+| P10 | **管道名前缀写错** | 忘了 `\\.\pipe\` 前缀 / 手抖打错短名 | 短名做成两端共用常量（`ipc::kPipeShortName`），前缀由代码统一拼 |
+
+### 和 `CallNamedPipe` 的取舍
+
+有个便捷 API `CallNamedPipe` 能把"连接+写+读+关"一次做完，适合**一问一答**；但它无法保持长连接、不能中途切消息模式。M3/M8 要多轮 Ping / OpenFile 请求，用的是 `CreateFileW` **长连接**。
+
+### 面试话术 K7：命名管道连接与坑
+
+> "命名管道客户端的'连接'动作确实就是一次 `CreateFileW(\\.\pipe\name, OPEN_EXISTING)`——因为命名管道由 npfs.sys 承载，本身就是 File 类型内核对象，复用了整套文件 I/O 语义，open 成功就等于连上。但健壮实现不止这一步：服务端用消息模式时客户端 open 后要 `SetNamedPipeHandleState` 切 `PIPE_READMODE_MESSAGE` 对齐，否则粘包；还要处理 `PIPE_BUSY`（`WaitNamedPipeW` 等空闲实例）、`FILE_NOT_FOUND`（管道没建好，重试）、`ACCESS_DENIED`（SD 没授权，不重试——这在沙箱里正是 AppContainer target 没被授权 Package SID 的信号）。收发侧还要把对端断开的 `BROKEN_PIPE` 当正常结束，并且不信任对端、逐条校验消息头和 payload 自洽。"
+
 ## 十、面试话术合集（内核层）
 
 ### 话术 K1：Object Manager 全景
@@ -366,6 +413,7 @@ M3 的 `DuplicateHandle` 是"共享同一个内核 pipe 对象"（§ 四），M7
 | AppContainer 命名空间前缀劫持 | M2 § 八 | M2.md § 八 |
 | LowBox Token 的 `TOKEN_LOWBOX` 位 | M2 § 九、话术 B/B' | M2.md |
 | SeAccessCheck 三层 | 全部 milestone 都用 | 本文 § 八 |
+| 命名管道 = File 对象 / 连接机制 / 使用坑 | M3（IPC）/ M8（文件 Broker） | 本文 § 九点六 |
 
 ## 十二、想深挖的参考资源
 
@@ -393,3 +441,4 @@ M3 的 `DuplicateHandle` 是"共享同一个内核 pipe 对象"（§ 四），M7
 - "为什么 HANDLE 不能跨进程传？" → § 四 HANDLE 是索引不是指针
 - "为什么某某内核 API 需要 privilege？" → § 八 SeAccessCheck + 各类型的 `ValidAccessMask`
 - "环境变量在哪、怎么传给子进程、是引用还是拷贝？" → § 九点五 PEB 与环境块（值拷贝 vs 句柄继承） → M7.md
+- "客户端连命名管道只要一个 CreateFile 吗？消息模式/PIPE_BUSY/ACCESS_DENIED 怎么处理？" → § 九点六 命名管道连接机制 + 坑清单

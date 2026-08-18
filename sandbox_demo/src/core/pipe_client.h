@@ -43,8 +43,16 @@ class PipeClient {
     // 请 broker 代劳打开文件。成功时 out_handle 是本进程 handle table 里有效
     // 的文件句柄（broker DuplicateHandle 过来的），可直接 ReadFile 使用；
     // out_result 带回 broker 的策略判定结果（kOk / kDenied / ...）。
+    // 这个重载保持 M3 语义：只读打开已存在文件（AccessMode::kRead +
+    // Disposition::kOpenExisting）。
     std::error_code RequestOpenFile(const std::wstring& path, HANDLE& out_handle,
                                     ipc::ResultCode& out_result);
+
+    // 【M8】完整版：显式指定访问方式和 disposition，支持请 broker 代劳
+    // 读/写/创建文件。broker 会按其策略判定该路径是否允许这种访问。
+    std::error_code RequestOpenFileEx(const std::wstring& path, ipc::AccessMode access,
+                                      ipc::Disposition disposition, HANDLE& out_handle,
+                                      ipc::ResultCode& out_result);
 
     [[nodiscard]] bool valid() const noexcept { return pipe_.valid(); }
 

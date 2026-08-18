@@ -24,14 +24,14 @@
 | **D7-8** ✅ | M4 注入 + Hook | **Ch 22 DLL 注入和 API 拦截**（这一章就是 W4） · Ch 19-20 DLL | Ch 4 §4.3 进程内存管理 · Ch 3 §3.4.1 句柄表 | 已完成 |
 | **D9** ✅ | M5 反注入 | Ch 22 后半（防注入部分） · Ch 20 §DLL 通知 | — | 已完成 |
 | **D10-12** ✅ | M6 WFP 网络管控 | —（Richter 未覆盖 WFP，看官方文档） | **Ch 9 §9.1 网络体系结构**（TDI/NDIS/WFP 对比） | 已完成 |
-| **D13** | M7 DNS 域名 | — | — | 1 h |
-| **D14-15** | M8 用户态文件 Broker | Ch 10 I/O（同步 vs 异步） · Ch 17 内存映射文件 | **Ch 6 I/O 系统** · Ch 7 §7.4 NTFS | 各 1.5 h |
+| **D13** ✅ | M7 DNS 域名 | — | — | 已完成 |
+| **D14-15** ✅ | M8 用户态文件 Broker | Ch 10 I/O（同步 vs 异步） · Ch 17 内存映射文件 | **Ch 6 I/O 系统** · Ch 7 §7.4 NTFS | 已完成 |
 | **D16-18** | M9 内核 Minifilter | 已跨界到内核态，Richter 不覆盖 | **Ch 6 §6.5 设备驱动 · §6.6 I/O 处理** · Ch 7 §7.4.3 文件系统 I/O 过滤 | 各 3 h |
 | **D19-20** | M10-11 测试 + 打包 | — | — | 复盘 |
 
 ---
 
-## 📍 当前进度（截至 M7）
+## 📍 当前进度（截至 M8）
 
 ```
 Day 1     M0 ✅  Job + Restricted Token
@@ -41,13 +41,13 @@ Day 6     M3 ✅  Broker/Target Named-Pipe IPC（DuplicateHandle + 管道 SDDL �
 Day 7-8   M4 ✅  DLL 注入 + API Hook（MinHook；注入垫片继承 target 权限不提权坑）
 Day 9     M5 ✅  反注入 + 运行时检测（内核 mitigation + 用户态自检；用 M4 injector 攻防对照）
 Day 10-12 M6 ✅  WFP 用户态网络管控（AppID 形态拦 loopback，还清 M2 § 九的债；IP 精确匹配实测本机不命中）
-Day 13    M7 ✅  DNS 域名维度（注入 dns_hook.dll 钩 GetAddrInfoW 做域名白名单；DNS→IP 联动 WFP）  ← 你在这里
-Day 14-15 M8 ⏳  用户态文件 Broker（复用 M3 的 IPC + DuplicateHandle 骨架）  ← 下一站
-Day 16-18 M9 ⏳  内核 Minifilter 驱动（W2 皇冠）
+Day 13    M7 ✅  DNS 域名维度（注入 dns_hook.dll 钩 GetAddrInfoW 做域名白名单；DNS→IP 联动 WFP）
+Day 14-15 M8 ✅  用户态文件 Broker（A: 策略引擎增强 防TOCTOU+最小权限 / B: DENY-ACE 剥夺写权限）  ← 你在这里
+Day 16-18 M9 ⏳  内核 Minifilter 驱动（W2 皇冠）  ← 下一站
 Day 19-20 M10-11 ⏳ 测试 + 打包
 ```
 
-**已完成 8 个 milestone（M0~M7）**。M4（攻：注入+hook）和 M5（守：反注入）互为镜像。M6 网络管控（WFP）按进程/IP 拦 outbound。M7 把网络管控升到域名维度——复用 M4 注入骨架，把 hook 点从 CreateFileW 换成 GetAddrInfoW，做域名白名单（form A 完全成功：白名单外域名解析返回 WSAHOST_NOT_FOUND），并演示 DNS→IP→WFP 联动纵深（form C）。下一站 M8 用户态文件 Broker。
+**已完成 9 个 milestone（M0~M8）**。M4（攻：注入+hook）和 M5（守：反注入）互为镜像。M6 网络管控（WFP）按进程/IP 拦 outbound。M7 把网络管控升到域名维度。M8 把 M3 的文件 broker 骨架升级成生产级：形态 A 做策略引擎增强（多规则白名单读写分离 + GetFinalPathNameByHandle 事后真身校验防 TOCTOU + 最小权限句柄回传），形态 B 演示互补路线（SetNamedSecurityInfo 给敏感目录加 DENY-WRITE ACE 从外部剥夺 target 写权限）。下一站 M9 内核 Minifilter。
 
 ---
 
@@ -255,9 +255,9 @@ Mandatory Label 段落尤其关键——你会看到 `SECURITY_MANDATORY_LOW_RID
 
 ---
 
-### ⏳ M8 — 用户态文件 Broker
+### ✅ M8（已完成）— 用户态文件 Broker
 
-**代码将用到**：命名管道 IPC + Broker 侧 `CreateFileW` + `DuplicateHandle` 把句柄传给 target；或者启动前 `SetSecurityInfo` 设 DENY ACE
+**代码用到**：命名管道 IPC（复用 M3）+ broker 侧 `CreateFileW` + `GetFinalPathNameByHandleW`（防 TOCTOU 真身校验）+ `DuplicateHandle`（最小权限复制）；形态 B 用 `GetNamedSecurityInfo`/`SetEntriesInAcl`/`SetNamedSecurityInfo` 给目录加 DENY-WRITE ACE
 
 **📗 Richter**：
 - Ch 10 同步/异步 I/O 复习
@@ -268,7 +268,12 @@ Mandatory Label 段落尤其关键——你会看到 `SECURITY_MANDATORY_LOW_RID
 | 章节 | 页码 | 你会明白 |
 |---|---|---|
 | **Ch 6 I/O 系统 §6.1~6.2** | 383~410 | IRP / 文件对象 / I/O 请求路径 |
-| **Ch 7 §7.4.5 NTFS** | ~510 | NTFS 的 ACL 存储、访问检查流程 |
+| **Ch 7 §7.4.5 NTFS** | ~510 | NTFS 的 ACL 存储、访问检查流程、DENY 优先命中的内核依据 |
+
+**M8 实测硬结论（写进 M8.md）**：
+- **形态 A（策略引擎增强）**：在 M3 骨架上补齐四点——① 多规则白名单读写分离（只读目录 vs 可写目录，命中规则后再判 access 维度，`kDenied` vs `kAccessNotAllowed` 区分）；② 协议扩展读/写/创建（`OpenFileRequest` 4B→12B 加 `access_mode`/`disposition`，version 提到 2 但兼容 v1）；③ **防 TOCTOU**：先开句柄再 `GetFinalPathNameByHandleW` 拿事后真身校验（解 symlink/junction/短名/大小写），校验对象=使用对象；④ 最小权限句柄（DuplicateHandle 按策略最小 access，非 `DUPLICATE_SAME_ACCESS`）。target `--ipc` 四行读/写放行拒绝符合预期。
+- **形态 B（DENY-ACE）**：broker 起 target 前给 `C:\sandbox_protected` 加针对当前用户 SID 的 DENY-WRITE ACE（含目录+文件继承），target 自己 CreateFileW 写被内核 DACL 检查一票否决（gle=5）。靠"restricted token 用户 SID 不变"定位 target，`FileAcl` 析构自动回滚。
+- **两条路线哲学**：A=主动授予（默认全禁 broker 发句柄，Chromium sandbox 套路），B=被动剥夺（改客体 ACL 从外部收权），纵深防御常一起用。
 
 ---
 
@@ -332,6 +337,7 @@ Mandatory Label 段落尤其关键——你会看到 `SECURITY_MANDATORY_LOW_RID
 - `docs/notes/M5.md` — M5 完整笔记 + 反注入双层（内核 mitigation + 用户态 self_defense）+ LdrRegisterDllNotification/远程线程扫描/API inline-hook 自检 + 用 M4 injector 攻防对照（防御ON注入被挡/OFF得手）+ 5 条金牌话术
 - `docs/notes/M6.md` — M6 完整笔记 + WFP 原理（vs Firewall / 用户态 filter vs 内核 callout）+ DYNAMIC 会话 + 两种形态（AppID 精确拦成功含 loopback / IP 黑名单）+ ⭐IP 精确匹配踩坑全记录（6 行证伪表 + M6_BLOCK_ALL 终极对照 + 根因 + netsh 显示陷阱 + exe 时间戳编译陷阱）+ 面试三连问
 - `docs/notes/M7.md` — M7 完整笔记 + DNS 解析真实链路（薄壳 + 进程外 dnscache）+ 三路线选型对比表 + 形态 A（hook GetAddrInfoW 域名白名单，实测 www.bing.com 被 WSAHOST_NOT_FOUND 拦）+ 白名单环境变量传递 + 形态 C（DNS→IP→WFP 联动纵深）+ 与 M4/M6 复用图谱 + 面试三连问
+- `docs/notes/M8.md` — M8 完整笔记 + 文件 Broker 两条路线对比（IPC 代劳 vs DENY-ACE）+ 形态 A 策略引擎四点增强（多规则白名单读写分离 / 协议读写创建扩展 / ⭐GetFinalPathNameByHandle 防 TOCTOU 真身校验 / 最小权限句柄回传）+ 形态 B（file_acl 模块 SetNamedSecurityInfo 加 DENY-WRITE ACE，靠 restricted token 用户 SID 不变定位 target）+ 与 M3/M0 复用图谱 + 面试三连问
 - **`docs/notes/kernel_objects_101.md`** ⭐ — **横切基础**：Object Manager / OBJECT_TYPE / HANDLE 表 / SeAccessCheck / KILL_ON_JOB_CLOSE 回调 / AppContainer 命名空间前缀劫持。所有 milestone 遇到"内核里到底怎么实现的"这类问题先来这里查
 - **`docs/notes/tools_cheatsheet.md`** ⭐ — **工具速查表**：Process Explorer / WinObj / ProcMon / dumpbin / WinDbg / wf.msc 等所有沙箱开发调试常用工具，按用途分类 + 每个工具"什么时候用它 + 对应我们代码哪个场景"
 - `README.md` — 工程总览 + JD 关键词映射

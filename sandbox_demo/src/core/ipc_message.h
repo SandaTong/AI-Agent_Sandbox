@@ -49,8 +49,15 @@ inline constexpr const wchar_t* kPipeShortName = L"wemeet_sandbox_m3_ipc";
 
 // 协议魔数 + 版本：每条消息头都带，broker 收到第一时间校验，防止对端发来
 // 的是垃圾数据 / 版本不匹配的旧客户端。'WMS3' = WeMeet Sandbox v3。
+//
+// 【M8 版本升到 2】M8 给 OpenFileRequest 增加了 access_mode / disposition 两
+// 个字段（支持只读/读写/创建等多种操作），OpenFileRequest 从 4 字节变 12 字节。
+// 为兼容 M3 老客户端（只发 4 字节 body 的 v1 请求），broker 侧按 payload 实际
+// 长度自适应：payload 只够老结构时按"只读打开"处理，够新结构时读 access/dispo。
+// magic 不变，version 提到 2；ValidateHeader 放行 v1/v2 两个版本。
 inline constexpr uint32_t kProtocolMagic = 0x33534D57;  // 'W''M''S''3' (小端)
-inline constexpr uint32_t kProtocolVersion = 1;
+inline constexpr uint32_t kProtocolVersion = 2;
+inline constexpr uint32_t kProtocolVersionM3 = 1;  // M3 老客户端版本（兼容放行）
 
 // payload 硬上限：任何一条消息的变长体不允许超过这个字节数。
 // 目的：target 就算发一个 payload_size=0xFFFFFFFF 的头，broker 也不会真去
@@ -87,6 +94,29 @@ enum class ResultCode : uint32_t {
     kDenied = 1,         // 策略拒绝（路径不在白名单等）
     kBadRequest = 2,     // 请求格式非法
     kInternalError = 3,  // broker 内部错误（打开失败等）
+    // M8 新增：请求的 access_mode 超出该路径在策略里被允许的权限
+    // （如对只读目录请求写）。和 kDenied 区分开，便于观测"路径白名单命中但
+    // 权限维度被拒"这种更细的策略判定。
+    kAccessNotAllowed = 4,
+};
+
+// 【M8】target 期望的访问方式。broker 会同时用它做两件事：
+//   1) 策略校验：该路径在白名单里是否被允许这种访问（只读目录不许写）
+//   2) 决定 CreateFileW 的 dwDesiredAccess / dwCreationDisposition
+// 用显式枚举而非直接传 Win32 GENERIC_* 位，避免不可信 target 传入危险组合
+// （如 GENERIC_ALL / WRITE_DAC / WRITE_OWNER 去改 ACL）。broker 只认这几种，
+// 再翻译成收敛过的 Win32 权限位——"协议层白名单"思想。
+enum class AccessMode : uint32_t {
+    kRead = 0,       // 只读：GENERIC_READ
+    kReadWrite = 1,  // 读写：GENERIC_READ | GENERIC_WRITE
+    kWrite = 2,      // 只写：GENERIC_WRITE
+};
+
+// 【M8】文件不存在/已存在时的处理方式，映射到 CreateFileW 的 disposition。
+enum class Disposition : uint32_t {
+    kOpenExisting = 0,  // OPEN_EXISTING：必须已存在（读场景默认）
+    kOpenAlways = 1,    // OPEN_ALWAYS：不存在则创建
+    kCreateAlways = 2,  // CREATE_ALWAYS：总是新建/截断
 };
 
 // -----------------------------------------------------------------------------
@@ -106,10 +136,24 @@ struct MsgHeader {
 // path_chars 是路径的字符数（不含结尾 L'\0'），broker 必须校验：
 //   path_chars <= kMaxPathChars 且 path_chars*2 + sizeof(OpenFileRequest) 与
 //   MsgHeader.payload_size 自洽——绝不信任单一字段。
+//
+// 【M8 扩展 + 向后兼容】原 M3 只有 path_chars 一个字段（4 字节）。M8 追加
+// access_mode / disposition 两个字段（各 4 字节，共 12 字节）。为兼容 M3 老
+// 客户端只发 4 字节 body 的情况，broker 侧按 body 实际长度判断：
+//   * body 只有 4 字节（>=offsetof(access_mode)之前）→ 老 v1 请求，按只读+
+//     OPEN_EXISTING 处理；
+//   * body 有 12 字节 → 新 v2 请求，读取 access_mode / disposition。
+// 字段顺序：把兼容用的 path_chars 放最前，新增字段追加在后，保证老布局是新
+// 布局的前缀（wire-compatible）。
 struct OpenFileRequest {
-    uint32_t path_chars;  // 后跟 path_chars 个 wchar_t（不含结尾 NUL）
+    uint32_t path_chars;    // 后跟 path_chars 个 wchar_t（不含结尾 NUL）
+    uint32_t access_mode;   // AccessMode（M8 新增；v1 请求无此字段，默认 kRead）
+    uint32_t disposition;   // Disposition（M8 新增；v1 请求无此字段，默认 kOpenExisting）
     // wchar_t path[path_chars];  // 变长，紧跟在本结构体之后
 };
+
+// 老 M3 请求 body 的最小长度（只含 path_chars）。broker 用它判断是不是 v1。
+inline constexpr uint32_t kOpenFileRequestV1Size = sizeof(uint32_t);  // 4
 
 // kOpenFileResponse 的 payload 布局：纯定长。
 // 句柄传递说明：broker 用 DuplicateHandle 把文件句柄复制到 target 进程后，
@@ -125,17 +169,18 @@ struct OpenFileResponse {
 
 // 静态断言：布局一旦被无意改动，编译期就报错，避免协议悄悄漂移。
 static_assert(sizeof(MsgHeader) == 16, "MsgHeader 必须是 16 字节");
-static_assert(sizeof(OpenFileRequest) == 4, "OpenFileRequest 必须是 4 字节");
+static_assert(sizeof(OpenFileRequest) == 12, "OpenFileRequest 必须是 12 字节 (M8 扩展后)");
 static_assert(sizeof(OpenFileResponse) == 16, "OpenFileResponse 必须是 16 字节");
 
 // -----------------------------------------------------------------------------
 // 头部校验：broker/client 收到任何消息，第一步都调它。返回 true 才继续解析。
 // 把"不信任对端"这条铁律固化成一个函数，避免每个调用点各写各的校验。
+// M8：放行 v1(M3)/v2(M8) 两个版本，向后兼容老 target。
 // -----------------------------------------------------------------------------
 [[nodiscard]] inline bool ValidateHeader(const MsgHeader& h) noexcept {
     if (h.magic != kProtocolMagic)
         return false;
-    if (h.version != kProtocolVersion)
+    if (h.version != kProtocolVersion && h.version != kProtocolVersionM3)
         return false;
     if (h.payload_size > kMaxPayloadBytes)
         return false;

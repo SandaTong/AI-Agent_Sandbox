@@ -3,7 +3,7 @@
 // -----------------------------------------------------------------------------
 // 一个"被沙箱化"的目标程序，用来对比基线 vs 沙箱下的行为差异。
 //
-// 启动时先做**8 个越狱测试**，每一项都对应某个 milestone 的一层护栏。基线运行
+// 启动时先做**9 个越狱测试**，每一项都对应某个 milestone 的一层护栏。基线运行
 // （直接双击）时几乎全成功；对应 milestone 的沙箱运行时应被拦下。之后进入心跳循环。
 //
 //   测试 1：写用户桌面文件   → 拦的层：Low IL 的 NTFS mandatory label（M1）
@@ -14,6 +14,7 @@
 //   测试 6：打开 global mutex → 拦的层：AppContainer 命名空间隔离（M2）
 //   测试 7：TCP 连公网/loopback → 拦的层：WFP filter（M6，AppID 形态含 loopback）
 //   测试 8：解析域名         → 拦的层：注入的 dns_hook.dll 钩 GetAddrInfoW 域名白名单（M7）
+//   测试 9：直接写受保护目录 → 拦的层：broker 起 target 前加的 DENY-ACE（M8 形态 B）
 // -----------------------------------------------------------------------------
 #include <windows.h>
 #include <winsock2.h>
@@ -21,6 +22,7 @@
 
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>  // strlen（M8：broker 代劳写文件）
 #include <cwchar>
 #include <fcntl.h>  // _O_U16TEXT
 #include <io.h>     // _setmode / _fileno
@@ -307,6 +309,30 @@ void Test8_ResolveDomain() {
     ::WSACleanup();
 }
 
+// 【M8 形态 B（DENY-ACE）配套】target 直接（不经 IPC）尝试写一个受保护目录下
+// 的文件。M8 的 denyacl demo 会在启动 target 前，用 SetSecurityInfo 给这个目录
+// 追加一条针对 target 用户 SID 的 DENY-WRITE ACE。于是：
+//   * 基线 / 未加 DENY-ACE：CreateFileW(GENERIC_WRITE) 成功 -> SUCCESS（沙箱漏了）
+//   * 加了 DENY-ACE：内核 DACL 评估里 DENY-ACE 优先于任何 ALLOW，直接
+//     ACCESS_DENIED(gle=5) -> BLOCKED。这演示"不靠 broker 代劳、直接用 NTFS ACL
+//     从外部把 target 的写权限摘掉"这条与 IPC 代劳互补的技术路线。
+void Test9_DirectWriteProtectedDir() {
+    static constexpr const wchar_t* kProtected = L"C:\\sandbox_protected\\jailbreak9.txt";
+    HANDLE h = ::CreateFileW(kProtected, GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
+                             FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h != INVALID_HANDLE_VALUE) {
+        ::CloseHandle(h);
+        ::DeleteFileW(kProtected);
+        std::wprintf(L"  [jailbreak-9] 直接写受保护目录 : SUCCESS (无 DENY-ACE，沙箱漏了!)\n");
+    } else {
+        DWORD gle = ::GetLastError();
+        const wchar_t* hint = (gle == ERROR_ACCESS_DENIED)    ? L" (DENY-ACE 生效，NTFS 挡下) ⭐"
+                              : (gle == ERROR_PATH_NOT_FOUND) ? L" (目录不存在，先建 C:\\sandbox_protected)"
+                                                              : L"";
+        std::wprintf(L"  [jailbreak-9] 直接写受保护目录 : BLOCKED  (gle=%lu)%ls\n", gle, hint);
+    }
+}
+
 // -----------------------------------------------------------------------------
 BOOL WINAPI CtrlHandler(DWORD type) {
     if (type == CTRL_C_EVENT || type == CTRL_BREAK_EVENT || type == CTRL_CLOSE_EVENT) {
@@ -374,6 +400,38 @@ void RunIpcClientDemo() {
 
     try_open(L"C:\\sandbox_share\\hello.txt");                // 白名单内：应 OK
     try_open(L"C:\\Windows\\System32\\drivers\\etc\\hosts");  // 白名单外：应 BLOCKED
+
+    // 【M8】读写分离演示：需要 broker 侧配置了可写目录策略（m8_demo 会配）。
+    // M3 broker 只有只读目录，这几条会走到 kAccessNotAllowed/kDenied，也能观察。
+    //   ① 请 broker 在【可写】目录创建并写文件 -> 应 OK（broker 代劳落盘）
+    //   ② 请 broker 对【只读】目录写文件 -> 应 BLOCKED (kAccessNotAllowed)
+    auto try_write = [&client](const wchar_t* path) {
+        HANDLE h = nullptr;
+        ipc::ResultCode rc = ipc::ResultCode::kInternalError;
+        auto ec = client.RequestOpenFileEx(path, ipc::AccessMode::kReadWrite,
+                                           ipc::Disposition::kCreateAlways, h, rc);
+        if (ec) {
+            std::wprintf(L"  [ipc] 请求写 %ls 传输失败: gle=%d\n", path, ec.value());
+            return;
+        }
+        if (rc == ipc::ResultCode::kOk && h) {
+            const char* msg = "written-by-broker-on-behalf-of-target\n";
+            DWORD wrote = 0;
+            BOOL ok = ::WriteFile(h, msg, static_cast<DWORD>(strlen(msg)), &wrote, nullptr);
+            std::wprintf(L"  [ipc] 写 %ls -> OK (broker 代劳)，WriteFile %ls，写入 %lu 字节\n", path,
+                         ok ? L"成功" : L"失败", wrote);
+            ::CloseHandle(h);
+        } else if (rc == ipc::ResultCode::kAccessNotAllowed) {
+            std::wprintf(L"  [ipc] 写 %ls -> BLOCKED（命中只读规则，broker 拒绝写）⭐\n", path);
+        } else if (rc == ipc::ResultCode::kDenied) {
+            std::wprintf(L"  [ipc] 写 %ls -> BLOCKED（越权路径，broker 拒绝）\n", path);
+        } else {
+            std::wprintf(L"  [ipc] 写 %ls -> 失败 (result=%u)\n", path, static_cast<unsigned>(rc));
+        }
+    };
+
+    try_write(L"C:\\sandbox_write\\agent_out.txt");  // 可写目录：m8_demo 下应 OK
+    try_write(L"C:\\sandbox_share\\should_fail.txt");  // 只读目录写：应 BLOCKED
 
     std::wprintf(L"[target] === IPC 演示结束 ===\n\n");
 }
@@ -485,6 +543,7 @@ int wmain(int argc, wchar_t** argv) {
     Test6_OpenGlobalNamedObject();
     Test7_TryNetworkConnect();
     Test8_ResolveDomain();
+    Test9_DirectWriteProtectedDir();
     std::wprintf(L"[target] === 越狱测试结束 ===\n\n");
 
     // 【M3】可选：跑 IPC 客户端演示（委托 broker 代劳打开文件）。

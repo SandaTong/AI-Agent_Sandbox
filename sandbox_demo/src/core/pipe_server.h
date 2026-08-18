@@ -40,11 +40,24 @@
 
 #include <string>
 #include <system_error>
+#include <vector>
 
 #include "common/scoped_handle.h"
 #include "core/ipc_message.h"
 
 namespace sandbox {
+
+// -----------------------------------------------------------------------------
+// 【M8】文件访问策略引擎的一条规则。
+//   dir_prefix：被授权的目录前缀（已规范化为大写、含尾部反斜杠）。
+//   allow_write：该目录是否允许写/创建（false = 只读目录）。
+// 多条规则组成白名单，broker 对每个请求做"规范化路径 -> 命中某条规则 -> 该规则
+// 是否允许本次 access_mode"的两级判定。这是相较 M3 单目录只读白名单的核心增强。
+// -----------------------------------------------------------------------------
+struct FilePolicyRule {
+    std::wstring dir_prefix;  // 形如 L"C:\\SANDBOX_SHARE\\"（大写规范化）
+    bool allow_write = false;
+};
 
 class PipeServer {
  public:
@@ -62,6 +75,11 @@ class PipeServer {
     //
     // 成功后管道处于监听状态，等待 target 连过来。
     std::error_code Create(const std::wstring& package_sid_sddl = L"");
+
+    // 【M8】设置文件访问策略（多规则白名单）。不调用时使用内置默认策略
+    //   （只读目录 C:\sandbox_share\，兼容 M3 行为）。M8 demo 会显式配置
+    //   一个只读目录 + 一个可写目录来演示读写分离。
+    void SetFilePolicy(std::vector<FilePolicyRule> rules);
 
     // 阻塞等待 target 连接（ConnectNamedPipe）。target 侧 CreateFileW 连上后
     // 返回。已有客户端在管道创建和本调用之间就连上的情况也正确处理
@@ -88,6 +106,7 @@ class PipeServer {
     std::error_code HandlePing(const ipc::MsgHeader& hdr);
 
     ScopedHandle pipe_;
+    std::vector<FilePolicyRule> policy_;  // M8 策略规则；空则用内置默认
 };
 
 }  // namespace sandbox

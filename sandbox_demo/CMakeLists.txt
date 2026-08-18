@@ -79,6 +79,7 @@ add_library(sandbox_core STATIC
     src/core/firewall.cc
     src/core/pipe_server.cc
     src/core/pipe_client.cc
+    src/core/file_acl.cc
     src/core/injector.cc
     src/core/self_defense.cc
     src/core/wfp_filter.cc
@@ -131,6 +132,14 @@ target_link_libraries(m7_demo PRIVATE sandbox_core)
 # 形态 C：DNS->IP 联动 M6 WFP（broker 侧解析域名拿 IP + AppID 兜底）
 add_executable(m7_ip_demo src/demo/m7_ip_demo.cc)
 target_link_libraries(m7_ip_demo PRIVATE sandbox_core ws2_32.lib)
+
+# ----- M8 演示程序（用户态文件 Broker） -------------------------------------
+# 形态 A：策略引擎增强版文件 broker（多规则白名单读写分离 + 防 TOCTOU + 最小权限句柄）
+add_executable(m8_demo src/demo/m8_demo.cc)
+target_link_libraries(m8_demo PRIVATE sandbox_core)
+# 形态 B：DENY-ACE 从外部剥夺 target 写权限（SetNamedSecurityInfo 追加 DENY-WRITE）
+add_executable(m8_denyacl_demo src/demo/m8_denyacl_demo.cc)
+target_link_libraries(m8_denyacl_demo PRIVATE sandbox_core)
 
 # ----- dns_hook.dll：M7 注入进 target 的域名管控垫片（MinHook 钩 GetAddrInfoW）--
 # 和 sandbox_hook.dll 同款配置：静态 CRT + 链接 minhook。
@@ -202,6 +211,8 @@ set_target_properties(m6_demo       PROPERTIES FOLDER "demo")
 set_target_properties(m6_appid_demo PROPERTIES FOLDER "demo")
 set_target_properties(m7_demo       PROPERTIES FOLDER "demo")
 set_target_properties(m7_ip_demo    PROPERTIES FOLDER "demo")
+set_target_properties(m8_demo       PROPERTIES FOLDER "demo")
+set_target_properties(m8_denyacl_demo PROPERTIES FOLDER "demo")
 set_target_properties(dns_hook      PROPERTIES FOLDER "demo")
 set_target_properties(sandbox_hook  PROPERTIES FOLDER "demo")
 set_target_properties(hello_target  PROPERTIES FOLDER "demo")
