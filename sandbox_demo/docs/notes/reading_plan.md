@@ -43,11 +43,11 @@ Day 9     M5 ✅  反注入 + 运行时检测（内核 mitigation + 用户态自
 Day 10-12 M6 ✅  WFP 用户态网络管控（AppID 形态拦 loopback，还清 M2 § 九的债；IP 精确匹配实测本机不命中）
 Day 13    M7 ✅  DNS 域名维度（注入 dns_hook.dll 钩 GetAddrInfoW 做域名白名单；DNS→IP 联动 WFP）
 Day 14-15 M8 ✅  用户态文件 Broker（A: 策略引擎增强 防TOCTOU+最小权限 / B: DENY-ACE 剥夺写权限）
-Day 16-18 M9 ✅  内核 Minifilter 驱动（A+B: IRP_MJ_CREATE 审计上报 + 敏感路径拦截 + 用户态下发策略）  ← 你在这里
-Day 19-20 M10-11 ⏳ 测试 + 打包  ← 下一站
+Day 16-18 M9 ✅  内核 Minifilter 驱动（A+B: IRP_MJ_CREATE 审计上报 + 敏感路径拦截 + 用户态下发策略）
+Day 19-20 M10-11 ✅ 测试 + 打包（顶层 README + run_all.bat 一键回归 + PROJECT_SUMMARY + package.bat）  ← 你在这里
 ```
 
-**已完成 10 个 milestone（M0~M9）**。M4（攻：注入+hook）和 M5（守：反注入）互为镜像。M6 网络管控（WFP）按进程/IP 拦 outbound。M7 把网络管控升到域名维度。M8 把 M3 的文件 broker 骨架升级成生产级（策略引擎防 TOCTOU + DENY-ACE）。M9 把文件管控下沉到**内核 Minifilter**：挂 FltMgr（altitude 370000），在 IRP_MJ_CREATE 的 Pre 回调里审计上报 + 按敏感路径黑名单拦截（STATUS_ACCESS_DENIED），黑名单经 FltMgr 通信端口由用户态下发——补上 M8 用户态防线可被绕过的缺口。下一站 M10-11 测试 + 打包。
+**全部 12 个 milestone 完成（M0~M11）**。M4（攻：注入+hook）和 M5（守：反注入）互为镜像。M6 网络管控（WFP）按进程/IP 拦 outbound。M7 把网络管控升到域名维度。M8 把 M3 的文件 broker 骨架升级成生产级（策略引擎防 TOCTOU + DENY-ACE）。M9 把文件管控下沉到内核 Minifilter。M10-11 收尾：顶层 `README.md`（项目门面/五层围栏全景/M0~M9 一览/JD 能力映射）、`run_all.bat`（一键顺序跑 M0~M8 非破坏性 demo 汇总 PASS/FAIL）、`PROJECT_SUMMARY.md`（踩坑合集 + 技术决策 + 面试 Q&A 大全）、`package.bat`（收拢 exe/dll/sys/脚本/docs 成 release zip，已实测跑通）。项目完结。
 
 ---
 
@@ -346,6 +346,9 @@ Mandatory Label 段落尤其关键——你会看到 `SECURITY_MANDATORY_LOW_RID
 - `docs/notes/M8.md` — M8 完整笔记 + 文件 Broker 两条路线对比（IPC 代劳 vs DENY-ACE）+ 形态 A 策略引擎四点增强（多规则白名单读写分离 / 协议读写创建扩展 / ⭐GetFinalPathNameByHandle 防 TOCTOU 真身校验 / 最小权限句柄回传）+ 形态 B（file_acl 模块 SetNamedSecurityInfo 加 DENY-WRITE ACE，靠 restricted token 用户 SID 不变定位 target）+ 与 M3/M0 复用图谱 + 面试三连问
 - `docs/notes/M9.md` — M9 完整笔记（上篇原理 + 下篇实现）：Minifilter 架构（挂 FltMgr/altitude/Pre-Post）+ IRP 拦截时序图（PreCreate 三返回值）+ 形态 A+B（IRP_MJ_CREATE 审计上报 + 敏感路径拦截 STATUS_ACCESS_DENIED + FltMgr 通信端口下发策略）+ 内核代码铁律（不信任对端/防溢出/KSPIN_LOCK/IRQL）+ 与 M8 纵深关系表 + 编译加载步骤 + 面试话术。配套 `src/minifilter/`（sandbox_minifilter.c/.h/.inf/.vcxproj + mf_ctl.cc + README）+ install/run/uninstall_mf.bat
 - `docs/notes/sandbox_vs_codex.md` — 本项目 vs OpenAI Codex Sandbox 对比（Windows 后端撞车点 Restricted Token/DENY ACE/帧式 IPC + 各自独有层 + 架构 Mermaid 图 + 面试口径）
+- **`README.md`（项目根）** ⭐ — 项目门面/总纲：五层围栏全景 + M0~M9 一览表 + 目录结构 + 快速开始 + 每个 demo 跑法 + JD 能力映射 + 文档索引。**新人/面试官看项目从这里入**
+- **`docs/notes/PROJECT_SUMMARY.md`** ⭐ — 项目总结：踩坑合集（按 M0~M9 分类的所有真实坑 + 解法）+ 关键技术决策（为什么这么选）+ 面试 Q&A 大全（各层话术汇总）
+- 收尾脚本：`run_all.bat`（一键回归 M0~M8）+ `package.bat`（打 release zip）
 - `docs/notes/resume_polish_feishu.md` — 面向飞书「桌面端 Agent Sandbox」岗位的简历润色稿（公司总览两版 + 腾讯会议/元宝项目 + 沙箱独立高亮项按 JD Windows 五维组织 + 技能关键词栏）
 - **`docs/notes/kernel_objects_101.md`** ⭐ — **横切基础**：Object Manager / OBJECT_TYPE / HANDLE 表 / SeAccessCheck / KILL_ON_JOB_CLOSE 回调 / AppContainer 命名空间前缀劫持。所有 milestone 遇到"内核里到底怎么实现的"这类问题先来这里查
 - **`docs/notes/tools_cheatsheet.md`** ⭐ — **工具速查表**：Process Explorer / WinObj / ProcMon / dumpbin / WinDbg / wf.msc 等所有沙箱开发调试常用工具，按用途分类 + 每个工具"什么时候用它 + 对应我们代码哪个场景"
