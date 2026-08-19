@@ -26,7 +26,7 @@
 | **D10-12** ✅ | M6 WFP 网络管控 | —（Richter 未覆盖 WFP，看官方文档） | **Ch 9 §9.1 网络体系结构**（TDI/NDIS/WFP 对比） | 已完成 |
 | **D13** ✅ | M7 DNS 域名 | — | — | 已完成 |
 | **D14-15** ✅ | M8 用户态文件 Broker | Ch 10 I/O（同步 vs 异步） · Ch 17 内存映射文件 | **Ch 6 I/O 系统** · Ch 7 §7.4 NTFS | 已完成 |
-| **D16-18** | M9 内核 Minifilter | 已跨界到内核态，Richter 不覆盖 | **Ch 6 §6.5 设备驱动 · §6.6 I/O 处理** · Ch 7 §7.4.3 文件系统 I/O 过滤 | 各 3 h |
+| **D16-18** ✅ | M9 内核 Minifilter | 已跨界到内核态，Richter 不覆盖 | **Ch 6 §6.5 设备驱动 · §6.6 I/O 处理** · Ch 7 §7.4.3 文件系统 I/O 过滤 | 已完成 |
 | **D19-20** | M10-11 测试 + 打包 | — | — | 复盘 |
 
 ---
@@ -42,12 +42,12 @@ Day 7-8   M4 ✅  DLL 注入 + API Hook（MinHook；注入垫片继承 target �
 Day 9     M5 ✅  反注入 + 运行时检测（内核 mitigation + 用户态自检；用 M4 injector 攻防对照）
 Day 10-12 M6 ✅  WFP 用户态网络管控（AppID 形态拦 loopback，还清 M2 § 九的债；IP 精确匹配实测本机不命中）
 Day 13    M7 ✅  DNS 域名维度（注入 dns_hook.dll 钩 GetAddrInfoW 做域名白名单；DNS→IP 联动 WFP）
-Day 14-15 M8 ✅  用户态文件 Broker（A: 策略引擎增强 防TOCTOU+最小权限 / B: DENY-ACE 剥夺写权限）  ← 你在这里
-Day 16-18 M9 ⏳  内核 Minifilter 驱动（W2 皇冠）  ← 下一站
-Day 19-20 M10-11 ⏳ 测试 + 打包
+Day 14-15 M8 ✅  用户态文件 Broker（A: 策略引擎增强 防TOCTOU+最小权限 / B: DENY-ACE 剥夺写权限）
+Day 16-18 M9 ✅  内核 Minifilter 驱动（A+B: IRP_MJ_CREATE 审计上报 + 敏感路径拦截 + 用户态下发策略）  ← 你在这里
+Day 19-20 M10-11 ⏳ 测试 + 打包  ← 下一站
 ```
 
-**已完成 9 个 milestone（M0~M8）**。M4（攻：注入+hook）和 M5（守：反注入）互为镜像。M6 网络管控（WFP）按进程/IP 拦 outbound。M7 把网络管控升到域名维度。M8 把 M3 的文件 broker 骨架升级成生产级：形态 A 做策略引擎增强（多规则白名单读写分离 + GetFinalPathNameByHandle 事后真身校验防 TOCTOU + 最小权限句柄回传），形态 B 演示互补路线（SetNamedSecurityInfo 给敏感目录加 DENY-WRITE ACE 从外部剥夺 target 写权限）。下一站 M9 内核 Minifilter。
+**已完成 10 个 milestone（M0~M9）**。M4（攻：注入+hook）和 M5（守：反注入）互为镜像。M6 网络管控（WFP）按进程/IP 拦 outbound。M7 把网络管控升到域名维度。M8 把 M3 的文件 broker 骨架升级成生产级（策略引擎防 TOCTOU + DENY-ACE）。M9 把文件管控下沉到**内核 Minifilter**：挂 FltMgr（altitude 370000），在 IRP_MJ_CREATE 的 Pre 回调里审计上报 + 按敏感路径黑名单拦截（STATUS_ACCESS_DENIED），黑名单经 FltMgr 通信端口由用户态下发——补上 M8 用户态防线可被绕过的缺口。下一站 M10-11 测试 + 打包。
 
 ---
 
@@ -277,9 +277,9 @@ Mandatory Label 段落尤其关键——你会看到 `SECURITY_MANDATORY_LOW_RID
 
 ---
 
-### ⏳ M9 — 内核 Minifilter 驱动（W2 皇冠）
+### ✅ M9（已完成）— 内核 Minifilter 驱动（W2 皇冠）
 
-**代码将用到**：`FltRegisterFilter` + Pre/Post Callbacks + `FLT_CONTEXT`、`.inf` 安装脚本、`sc create` + `fltmc load`
+**代码用到**：`FltRegisterFilter` + `FltStartFiltering` + `IRP_MJ_CREATE` Pre 回调 + `FltGetFileNameInformation`(规范化路径) + `FLT_PREOP_COMPLETE`/`STATUS_ACCESS_DENIED`(拦截) + `FltCreateCommunicationPort`/`FltSendMessage`(审计上报) + `PortMessage`(策略下发) + `.inf`(altitude 370000/FSFilter) + `fltmc load`
 
 **📕 潘书（这一步不看内核书完全写不出来）**：
 
@@ -301,6 +301,12 @@ Mandatory Label 段落尤其关键——你会看到 `SECURITY_MANDATORY_LOW_RID
 - Minifilter 和 Legacy Filter Driver 的差别？为什么用 Minifilter？
 - Altitude 是什么？为什么必须向微软申请？
 - Pre-Callback 里 return `FLT_PREOP_COMPLETE` 和 `FLT_PREOP_SUCCESS_NO_CALLBACK` 的区别？
+
+**M9 实测硬结论（写进 M9.md）**：
+- **形态 A+B 合一**：一个 Minifilter 同时审计 + 拦截。挂 FltMgr（altitude 370000），`IRP_MJ_CREATE` 的 `PreCreate` 里 `FltGetFileNameInformation` 拿规范化路径 + `PsGetCurrentProcessId` 拿 PID；命中敏感路径黑名单 → `FLT_PREOP_COMPLETE` + `STATUS_ACCESS_DENIED` 从内核挡死（ntfs.sys 没被调到），否则放行；放行/拦截都经 `FltSendMessage` 上报审计。黑名单经 FltMgr 通信端口由用户态 `mf_ctl` 下发，端口 SD 只放行 Admin/SYSTEM。
+- **相对 M8 的三点纵深**：① 覆盖全机任意进程任意路径（用户态绕不过）② 内核拿到的是最终解析对象，天然免疫 TOCTOU/symlink（M8 要靠 GetFinalPathNameByHandle 补）③ 代价是崩溃即蓝屏（须 VM + testsigning）。
+- **交付**：驱动本体 `sandbox_minifilter.c`(WDK 编) + `mf_protocol.h` + `.inf` + `.vcxproj` + 用户态 `mf_ctl.cc`(主 CMake 已编译通过) + install/run/uninstall_mf.bat。实测输出待 VM 跑完回填。
+- **内核代码铁律**：不信任对端（PortMessage 严格校验 + `__try/__except`）、防溢出（len 夹紧）、并发用 KSPIN_LOCK、只拦 `RequestorMode==UserMode`、回调在 PASSIVE_LEVEL。
 
 ---
 
@@ -338,6 +344,9 @@ Mandatory Label 段落尤其关键——你会看到 `SECURITY_MANDATORY_LOW_RID
 - `docs/notes/M6.md` — M6 完整笔记 + WFP 原理（vs Firewall / 用户态 filter vs 内核 callout）+ DYNAMIC 会话 + 两种形态（AppID 精确拦成功含 loopback / IP 黑名单）+ ⭐IP 精确匹配踩坑全记录（6 行证伪表 + M6_BLOCK_ALL 终极对照 + 根因 + netsh 显示陷阱 + exe 时间戳编译陷阱）+ 面试三连问
 - `docs/notes/M7.md` — M7 完整笔记 + DNS 解析真实链路（薄壳 + 进程外 dnscache）+ 三路线选型对比表 + 形态 A（hook GetAddrInfoW 域名白名单，实测 www.bing.com 被 WSAHOST_NOT_FOUND 拦）+ 白名单环境变量传递 + 形态 C（DNS→IP→WFP 联动纵深）+ 与 M4/M6 复用图谱 + 面试三连问
 - `docs/notes/M8.md` — M8 完整笔记 + 文件 Broker 两条路线对比（IPC 代劳 vs DENY-ACE）+ 形态 A 策略引擎四点增强（多规则白名单读写分离 / 协议读写创建扩展 / ⭐GetFinalPathNameByHandle 防 TOCTOU 真身校验 / 最小权限句柄回传）+ 形态 B（file_acl 模块 SetNamedSecurityInfo 加 DENY-WRITE ACE，靠 restricted token 用户 SID 不变定位 target）+ 与 M3/M0 复用图谱 + 面试三连问
+- `docs/notes/M9.md` — M9 完整笔记（上篇原理 + 下篇实现）：Minifilter 架构（挂 FltMgr/altitude/Pre-Post）+ IRP 拦截时序图（PreCreate 三返回值）+ 形态 A+B（IRP_MJ_CREATE 审计上报 + 敏感路径拦截 STATUS_ACCESS_DENIED + FltMgr 通信端口下发策略）+ 内核代码铁律（不信任对端/防溢出/KSPIN_LOCK/IRQL）+ 与 M8 纵深关系表 + 编译加载步骤 + 面试话术。配套 `src/minifilter/`（sandbox_minifilter.c/.h/.inf/.vcxproj + mf_ctl.cc + README）+ install/run/uninstall_mf.bat
+- `docs/notes/sandbox_vs_codex.md` — 本项目 vs OpenAI Codex Sandbox 对比（Windows 后端撞车点 Restricted Token/DENY ACE/帧式 IPC + 各自独有层 + 架构 Mermaid 图 + 面试口径）
+- `docs/notes/resume_polish_feishu.md` — 面向飞书「桌面端 Agent Sandbox」岗位的简历润色稿（公司总览两版 + 腾讯会议/元宝项目 + 沙箱独立高亮项按 JD Windows 五维组织 + 技能关键词栏）
 - **`docs/notes/kernel_objects_101.md`** ⭐ — **横切基础**：Object Manager / OBJECT_TYPE / HANDLE 表 / SeAccessCheck / KILL_ON_JOB_CLOSE 回调 / AppContainer 命名空间前缀劫持。所有 milestone 遇到"内核里到底怎么实现的"这类问题先来这里查
 - **`docs/notes/tools_cheatsheet.md`** ⭐ — **工具速查表**：Process Explorer / WinObj / ProcMon / dumpbin / WinDbg / wf.msc 等所有沙箱开发调试常用工具，按用途分类 + 每个工具"什么时候用它 + 对应我们代码哪个场景"
 - `README.md` — 工程总览 + JD 关键词映射

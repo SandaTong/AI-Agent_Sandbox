@@ -141,6 +141,15 @@ target_link_libraries(m8_demo PRIVATE sandbox_core)
 add_executable(m8_denyacl_demo src/demo/m8_denyacl_demo.cc)
 target_link_libraries(m8_denyacl_demo PRIVATE sandbox_core)
 
+# ----- M9 用户态控制程序（连 Minifilter 通信端口，收审计 + 下发策略）----------
+# 注意：Minifilter 驱动本体 sandbox_minifilter.sys 需 WDK 单独编译（见
+# src/minifilter/README.md 和 sandbox_minifilter.vcxproj）；这里只编纯用户态的
+# 控制程序 mf_ctl（链接 fltlib，普通 MSVC 即可）。
+add_executable(mf_ctl src/minifilter/mf_ctl.cc)
+target_include_directories(mf_ctl PRIVATE src/minifilter)
+target_link_libraries(mf_ctl PRIVATE fltlib.lib)
+set_target_properties(mf_ctl PROPERTIES FOLDER "demo")
+
 # ----- dns_hook.dll：M7 注入进 target 的域名管控垫片（MinHook 钩 GetAddrInfoW）--
 # 和 sandbox_hook.dll 同款配置：静态 CRT + 链接 minhook。
 add_library(dns_hook SHARED src/demo/dns_hook.cc)

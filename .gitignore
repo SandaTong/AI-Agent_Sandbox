@@ -2,6 +2,21 @@
 sandbox_demo/build
 sandbox_demo/build_m0
 
+# M9 Minifilter 的 WDK 编译产物（VS 驱动工程默认输出到工程目录下的 x64/ 等，
+# 不走 build_m0/）。这些是生成物，不纳入版本控制。
+sandbox_demo/src/minifilter/x64/
+sandbox_demo/src/minifilter/Debug/
+sandbox_demo/src/minifilter/Release/
+sandbox_demo/src/minifilter/*.log
+# WDK 中间/产物文件类型兜底
+*.tlog
+*.sys
+*.pdb
+*.obj
+*.cat
+*.lastbuildstate
+*.recipe
+
 # 注意：src/third_party/minhook 是 vendored 的第三方源码（M4 API Hook 用），
 # 通过 git clone 引入、未纳入本仓库版本控制。它**不应**被忽略或清理——
 # 若执行 git clean 请务必带 -e sandbox_demo/src/third_party/ 排除它，

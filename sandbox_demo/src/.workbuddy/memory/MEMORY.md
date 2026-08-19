@@ -1,8 +1,8 @@
 # 项目记忆 — sandbox_demo (Windows 沙箱)
 
 ## 项目目标
-基于 Windows 安全机制实现一个进程沙箱。当前已推进到 M7(DNS 域名维度网络管控,M4 hook 思路 + M6 WFP 联动)。
-M0~M7 路线图全部完成。
+基于 Windows 安全机制实现一个进程沙箱。当前已推进到 M8(文件维度深度管控:IPC broker 策略引擎 + NTFS DACL 外部剥夺)。
+M0~M8 路线图全部完成。
 
 ## M0 架构(双支柱 + 三步舞)
 - **支柱一 TokenManager**(`core/token_manager.cc`):`CreateRestrictedToken(DISABLE_MAX_PRIVILEGE)`
@@ -165,6 +165,35 @@ M0~M7 路线图全部完成。
     4. 拒绝解析返回 `WSAHOST_NOT_FOUND` 而非 `EAI_FAIL`:前者语义是"域名不存在",target 拿不到 IP 自然连不上;比直接拦 connect 更早、更干净。
     5. 形态 C 的 IP 联动在本机受 M6 IP 不命中限制 → 用 AppID 兜底保证沙箱语义,真实产品需内核 callout 做 IP 白名单。
   - **M7 在沙箱里的定位**:M6 是"IP 维度网络管控"(内核网络栈),M7 是"域名维度网络管控"(进程内 hook)+ "DNS→IP→WFP 联动纵深防御"。M6 看不到域名(早在 DNS 解析就变 IP 了),M7 在 DNS 解析这一环补上域名维度。两者叠加 = hostname + IP 双维度网络沙箱。
+- M8: ~~文件维度深度管控(IPC broker 策略引擎 + NTFS DACL 外部剥夺)。~~ 已完成。
+  - **M8 要解决什么**:M3 的 IPC 文件 broker 只是"单目录只读白名单",太弱。M8 把它升级成生产级策略引擎(形态 A),并补一条"从客体侧外部剥夺写权限"的路线(形态 B),构成文件维度的纵深防御。
+  - 新增 `core/file_acl.{h,cc}`:**形态 B——NTFS DACL 外部剥夺**。`FileAcl::AddDenyWrite` 给敏感目录的 DACL 追加一条针对 target 主体 SID 的 DENY-WRITE ACE(含 CONTAINER_INHERIT_ACE|OBJECT_INHERIT_ACE 覆盖目录内文件)。析构自动回滚(也可显式 `RemoveDenyWrite`)。
+    - **为什么 DENY-ACE 一定能挡住 ALLOW**:Windows 访问检查按 ACE 在 DACL 里的顺序逐条评估,DENY 类型只要命中所需权限位就立即拒绝,不会再看后面的 ALLOW。系统规范顺序是 DENY 在前 ALLOW 在后(用 `AddAccessDeniedAceEx` 插到最前)。所以哪怕 target 用户 SID 在该目录本来有 Users:(M) 的 ALLOW,追加的 DENY-WRITE 也会赢。
+    - **为什么对当前用户 SID 下 DENY 就能作用到 target**:M0 的 restricted token 从当前进程 token 派生,**用户 SID 不变**(restricted 只是移除 privilege / 加 restricting SID),所以对当前用户 SID 下 DENY 就作用到 target。
+    - 最小侵入 + 可回滚:只追加一条 DENY ACE(不动原有 ACE),记住后退出时删掉,不污染真实目录权限。
+  - **形态 A——IPC broker 策略引擎增强**(改 `pipe_server.{h,cc}` + `ipc_message.h`,无新 core 文件):
+    - `pipe_server.h` 新增 `FilePolicyRule{dir_prefix, allow_write}` 结构 + `SetFilePolicy()`。多规则白名单:一个【只读】目录 + 一个【可写】目录,读写权限分离。broker 对每个请求做"规范化路径 → 命中某条规则 → 该规则是否允许本次 access_mode"的两级判定。不调 SetFilePolicy 时用内置默认(只读 C:\sandbox_share\,兼容 M3)。
+    - `ipc_message.h` 协议升级到 v2:`OpenFileRequest` 从 4 字节(path_chars)扩到 12 字节(追加 `access_mode` + `disposition`)。
+      - `AccessMode` 枚举:kRead(0,GENERIC_READ) / kReadWrite(1) / kWrite(2,GENERIC_WRITE)。用显式枚举而非直接传 Win32 GENERIC_* 位,避免不可信 target 传入危险组合(如 GENERIC_ALL/WRITE_DAC/WRITE_OWNER 改 ACL)——"协议层白名单"思想。
+      - `Disposition` 枚举:kOpenExisting(0) / kOpenAlways(1) / kCreateAlways(2)。
+      - **向后兼容**:字段顺序把 path_chars 放最前,新增字段追加在后,保证老布局是新布局的前缀(wire-compatible)。broker 按 payload 实际长度判断 v1(4字节,按只读+OPEN_EXISTING)/ v2(12字节)。ValidateHeader 放行 v1/v2 两个版本。
+      - `ResultCode` 新增 `kAccessNotAllowed`(4):"路径白名单命中但权限维度被拒"(如对只读目录请求写),和 `kDenied`(路径不在白名单)区分开,便于观测更细的策略判定。
+    - **防 TOCTOU**:broker 先开句柄,再用 `GetFinalPathNameByHandle` 拿"事后真身"(已解 symlink/junction/短名/大小写)去比白名单,杜绝检查时机攻击。
+    - **最小权限句柄回传**:DuplicateHandle 时按本次策略允许的最小 access 复制,不再 `DUPLICATE_SAME_ACCESS` 原样带权限。
+  - 新增 `demo/m8_demo.cc`(**形态 A**):多规则白名单(只读 C:\sandbox_share\ + 可写 C:\sandbox_write\)。预期:读 sandbox_share\hello.txt OK / 写 sandbox_write\agent_out.txt OK(broker 代劳落盘)/ 写 sandbox_share\should_fail.txt BLOCKED(命中只读规则,kAccessNotAllowed)⭐。
+  - 新增 `demo/m8_denyacl_demo.cc`(**形态 B**):broker 起 target 前给 C:\sandbox_protected 追加 DENY-WRITE ACE。预期 target 的 jailbreak-9(直接写 C:\sandbox_protected\jailbreak9.txt)BLOCKED(gle=5 ACCESS_DENIED)⭐。demo 结束 FileAcl 析构自动回滚 ACE。
+  - `demo/hello_target.cc` 接入 M8:新增 `Test9_WriteProtectedDir`(jailbreak-9,直接写 C:\sandbox_protected\jailbreak9.txt)。
+  - **M8 踩坑/要点**:
+    1. DENY-ACE 必须带 CONTAINER_INHERIT_ACE|OBJECT_INHERIT_ACE 才能覆盖目录下新建文件(jailbreak-9 写的是目录下的文件)。
+    2. DENY-ACE 要插到 DACL 最前(用 AddAccessDeniedAceEx),否则若 ALLOW 在前可能先命中放行(DACL 顺序敏感)。
+    3. 形态 A 的协议升级要保证 wire-compatible:新字段追加在旧字段之后,broker 按 body 实际长度自适应版本。
+    4. 防 TOCTOU 必须先开句柄再 GetFinalPathNameByHandle(不能先 ResolvePath 再 Open)——否则检查和打开之间路径可能被替换(symlink/junction 攻击)。
+    5. 形态 B 需要对目录有 WRITE_DAC 权限(一般当前用户对自己建的目录就有)。改系统目录 ACL 危险,demo 用临时 C:\sandbox_protected。
+  - **形态 A vs 形态 B 的关系(两条互补路线)**:
+    - 形态 A(IPC broker):**主动授予**——默认全禁,broker 按策略"发"句柄。target 什么都开不了,敏感操作委托 broker 代劳。
+    - 形态 B(DENY-ACE):**被动剥夺**——改客体 ACL,从外部收权。target 自己 CreateFileW 会被内核访问检查一票否决。
+    - 两者叠加 = 文件维度纵深防御:形态 A 管"target 主动请求的代劳操作",形态 B 管"target 自己尝试直接写"。即使 target 绕过 IPC 自己 CreateFileW,形态 B 的 DENY-ACE 仍兜底拦截。
+  - **M8 在沙箱里的定位**:M0~M2 是"被动配置内核机制",M3 是"target 主动请 broker 代劳",M8 把 M3 的代劳通道升级成生产级策略引擎(形态 A)+ 补一条客体侧外部剥夺路线(形态 B)。M3 的 IPC 是"单目录只读",M8 是"多规则读写分离 + 防 TOCTOU + 最小权限句柄 + DACL 外部剥夺"。文件维度从"能读一个目录"升到"生产级文件管控"。
 
 ## 技术约定
 - 使用 `ScopedHandle` 做 HANDLE 的 RAII 管理,避免句柄泄漏。

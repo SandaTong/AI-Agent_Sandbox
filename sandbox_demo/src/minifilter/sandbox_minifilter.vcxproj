@@ -1,0 +1,95 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  sandbox_minifilter.vcxproj — WDK 驱动工程（M9 Minifilter）
+
+  用 Visual Studio + WDK 打开本 vcxproj 直接编译，输出 sandbox_minifilter.sys。
+  依赖：已安装 Windows Driver Kit (WDK) 且与 VS 集成（有 Driver 工具集）。
+  平台：x64 / Debug 或 Release。测试加载需开 testsigning（见 README.md）。
+-->
+<Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup Label="ProjectConfigurations">
+    <ProjectConfiguration Include="Debug|x64">
+      <Configuration>Debug</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+    <ProjectConfiguration Include="Release|x64">
+      <Configuration>Release</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+  </ItemGroup>
+
+  <PropertyGroup Label="Globals">
+    <ProjectGuid>{9F1E7C21-2B44-4E0A-9C77-9A9F5B8D0A11}</ProjectGuid>
+    <TargetVersion>Windows10</TargetVersion>
+    <MinimumVisualStudioVersion>16.0</MinimumVisualStudioVersion>
+    <Configuration>Debug</Configuration>
+    <Platform>x64</Platform>
+    <RootNamespace>sandbox_minifilter</RootNamespace>
+    <!-- 关键：Driver 工程类型 + Minifilter 子类型 -->
+    <DriverType>WDM</DriverType>
+    <DriverTargetPlatform>Universal</DriverTargetPlatform>
+    <!-- 学习 demo：全局关闭 Spectre 缓解要求（必须在所有 import 之前设，否则被
+         WDK targets 强制回默认导致 MSB8040）。若已装 Spectre-mitigated libs 组件
+         可删本行。 -->
+    <SpectreMitigation>false</SpectreMitigation>
+  </PropertyGroup>
+
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
+
+  <PropertyGroup Label="Configuration">
+    <ConfigurationType>Driver</ConfigurationType>
+    <DriverType>WDM</DriverType>
+    <PlatformToolset>WindowsKernelModeDriver10.0</PlatformToolset>
+    <UseDebugLibraries Condition="'$(Configuration)'=='Debug'">true</UseDebugLibraries>
+    <UseDebugLibraries Condition="'$(Configuration)'=='Release'">false</UseDebugLibraries>
+    <!-- 学习 demo：关掉编译后的自动测试签名（本机可能没测试证书；到 VM 里用
+         MakeCert/自签或直接 testsigning 加载）。也关掉 INF 校验（部分 WDK 版本缺
+         x86\InfVerif.dll 会报错，但不影响 .sys 生成）。 -->
+    <SignMode>Off</SignMode>
+    <InfVerif_AdditionalOptions></InfVerif_AdditionalOptions>
+    <RunInfVerif>false</RunInfVerif>
+    <ApiValidator_Enable>false</ApiValidator_Enable>
+  </PropertyGroup>
+
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+
+  <ItemDefinitionGroup>
+    <ClCompile>
+      <WarningLevel>Level4</WarningLevel>
+      <TreatWarningAsError>false</TreatWarningAsError>
+    </ClCompile>
+    <Link>
+      <!-- Minifilter 必须链接 fltMgr.lib -->
+      <AdditionalDependencies>%(AdditionalDependencies);$(DDK_LIB_PATH)fltMgr.lib</AdditionalDependencies>
+    </Link>
+    <!-- INF 一起打包进驱动包 -->
+    <Inf>
+      <TimeStamp>*</TimeStamp>
+    </Inf>
+    <!-- 学习 demo：不做签名 / 不生成 catalog（关掉 inf2cat + signtool 收尾）。 -->
+    <DriverSign>
+      <FileDigestAlgorithm>SHA256</FileDigestAlgorithm>
+    </DriverSign>
+  </ItemDefinitionGroup>
+
+  <!-- 关掉 WDK 的打包/校验/签名收尾目标：只要 .sys 编出来即可，
+       .cat / InfVerif / signtool 到 VM 里用测试证书单独做。 -->
+  <PropertyGroup>
+    <EnableInf2cat>false</EnableInf2cat>
+    <SignToolCertificateName></SignToolCertificateName>
+    <GenerateDriverPackage>false</GenerateDriverPackage>
+    <SkipInfVerifTask>true</SkipInfVerifTask>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ClCompile Include="sandbox_minifilter.c" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="mf_protocol.h" />
+  </ItemGroup>
+  <ItemGroup>
+    <Inf Include="sandbox_minifilter.inf" />
+  </ItemGroup>
+
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+</Project>

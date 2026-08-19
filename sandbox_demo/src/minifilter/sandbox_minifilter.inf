@@ -1,0 +1,82 @@
+;;; ----------------------------------------------------------------------------
+;;; sandbox_minifilter.inf
+;;; ----------------------------------------------------------------------------
+;;; 【M9】文件系统 Minifilter 驱动安装信息。
+;;;
+;;; 关键点：
+;;;   * ServiceType = 2 (SERVICE_FILE_SYSTEM_DRIVER) —— 文件系统驱动
+;;;   * 服务组 "FSFilter Activity Monitor" + Altitude=370000
+;;;     —— altitude 决定过滤栈顺序（唯一，正式产品需向微软申请；370000 属活动监控区间，学习借用）
+;;;   * DefaultInstall/Services 让"右键 -> 安装"或 RtlInstallOs 可用
+;;;
+;;; 安装（管理员）：右键本 inf -> 安装；或脚本 sc create + fltmc load（见 install_mf.bat）。
+;;; ----------------------------------------------------------------------------
+
+[Version]
+Signature   = "$Windows NT$"
+Class       = "ActivityMonitor"
+ClassGuid   = {b86dff51-a31d-4f34-98d8-2432fbf0ede6}
+Provider    = %ProviderName%
+DriverVer   =
+CatalogFile = sandbox_minifilter.cat
+PnpLockdown = 1
+
+[DestinationDirs]
+DefaultDestDir          = 12            ; %windir%\system32\drivers
+MiniFilter.DriverFiles  = 12
+
+;; inf2cat / 打包需要的源盘声明 ---------------------------------------------
+[SourceDisksNames]
+1 = %DiskName%,,,""
+
+[SourceDisksFiles]
+sandbox_minifilter.sys = 1,,
+
+;; ---------------------------------------------------------------------------
+[DefaultInstall.NTamd64]
+OptionDesc  = %ServiceDescription%
+CopyFiles   = MiniFilter.DriverFiles
+
+[DefaultInstall.NTamd64.Services]
+AddService  = %ServiceName%,,MiniFilter.Service
+
+;; ---------------------------------------------------------------------------
+[DefaultUninstall.NTamd64]
+DelFiles    = MiniFilter.DriverFiles
+
+[DefaultUninstall.NTamd64.Services]
+DelService  = %ServiceName%,0x200      ; SPSVCINST_STOPSERVICE
+
+;; ---------------------------------------------------------------------------
+[MiniFilter.Service]
+DisplayName    = %ServiceName%
+Description    = %ServiceDescription%
+ServiceBinary  = %12%\%DriverName%.sys
+Dependencies   = "FltMgr"
+ServiceType    = 2                      ; SERVICE_FILE_SYSTEM_DRIVER
+StartType      = 3                      ; SERVICE_DEMAND_START（手动，fltmc load 时起）
+ErrorControl   = 1                      ; SERVICE_ERROR_NORMAL
+LoadOrderGroup = "FSFilter Activity Monitor"
+AddReg         = MiniFilter.AddRegistry
+
+[MiniFilter.AddRegistry]
+HKR,,"DebugFlags",0x00010001,0x0
+HKR,,"SupportedFeatures",0x00010001,0x3
+HKR,"Instances","DefaultInstance",0x00000000,%DefaultInstance%
+HKR,"Instances\"%Instance1.Name%,"Altitude",0x00000000,%Instance1.Altitude%
+HKR,"Instances\"%Instance1.Name%,"Flags",0x00010001,0x0
+
+[MiniFilter.DriverFiles]
+%DriverName%.sys
+
+;; ---------------------------------------------------------------------------
+[Strings]
+ProviderName        = "WemeetSandboxDemo"
+ServiceName         = "sandboxmf"
+ServiceDescription  = "Sandbox M9 File Minifilter (audit + block)"
+DriverName          = "sandbox_minifilter"
+DiskName            = "Sandbox M9 Minifilter Install Disk"
+
+DefaultInstance     = "sandboxmf Instance"
+Instance1.Name      = "sandboxmf Instance"
+Instance1.Altitude  = "370000"
