@@ -1,8 +1,8 @@
 # 项目记忆 — sandbox_demo (Windows 沙箱)
 
 ## 项目目标
-基于 Windows 安全机制实现一个进程沙箱。当前已推进到 M8(文件维度深度管控:IPC broker 策略引擎 + NTFS DACL 外部剥夺)。
-M0~M8 路线图全部完成。
+基于 Windows 安全机制实现一个进程沙箱。当前已推进到 M9(内核态文件系统 Minifilter 驱动:Pre-Create 审计+拦截+用户态下发策略)。
+M0~M9 路线图全部完成。M9 是项目首次进入内核态。
 
 ## M0 架构(双支柱 + 三步舞)
 - **支柱一 TokenManager**(`core/token_manager.cc`):`CreateRestrictedToken(DISABLE_MAX_PRIVILEGE)`
@@ -194,6 +194,35 @@ M0~M8 路线图全部完成。
     - 形态 B(DENY-ACE):**被动剥夺**——改客体 ACL,从外部收权。target 自己 CreateFileW 会被内核访问检查一票否决。
     - 两者叠加 = 文件维度纵深防御:形态 A 管"target 主动请求的代劳操作",形态 B 管"target 自己尝试直接写"。即使 target 绕过 IPC 自己 CreateFileW,形态 B 的 DENY-ACE 仍兜底拦截。
   - **M8 在沙箱里的定位**:M0~M2 是"被动配置内核机制",M3 是"target 主动请 broker 代劳",M8 把 M3 的代劳通道升级成生产级策略引擎(形态 A)+ 补一条客体侧外部剥夺路线(形态 B)。M3 的 IPC 是"单目录只读",M8 是"多规则读写分离 + 防 TOCTOU + 最小权限句柄 + DACL 外部剥夺"。文件维度从"能读一个目录"升到"生产级文件管控"。
+- M9: ~~内核态文件系统 Minifilter 驱动(Pre-Create 审计+拦截+用户态下发策略)。~~ 已完成。**项目首次进入内核态。**
+  - **M9 的本质跃迁**:M0~M8 全是用户态代码(调 Win32 API,约束靠内核强制执行)。M9 是 `.sys` 内核驱动,挂在 FltMgr(fltmgr.sys)下,在 `IRP_MJ_CREATE` 的 Pre 回调里拦截——这是**真正的内核态执行**,在 IRP 到达 ntfs.sys 之前就拦下。WDK 编译,需 testsigning 加载,bug = 蓝屏(VM+快照)。
+  - 新增 `minifilter/` 子目录(不在 core/ 下,因为驱动工程独立,不进主 CMake):
+    - `sandbox_minifilter.c`:**驱动本体**(WDK 编译)。DriverEntry → FltRegisterFilter → FltCreateCommunicationPort → FltStartFiltering。
+      - `PreCreate` 回调(IRP_MJ_CREATE Pre):① 跳过 KernelMode 请求 ② `FltGetFileNameInformation` 拿规范化路径(如 `\Device\HarddiskVolume3\secret\a.txt`)③ 大写化 ④ 查用户态下发的黑名单 ⑤ 命中→`Data->IoStatus.Status = STATUS_ACCESS_DENIED` + `FLT_PREOP_COMPLETE`(请求不再下发 ntfs.sys,内核态拦截)⑥ 无论放行/拦截都 `FltSendMessage` 上报审计记录。
+      - **通信端口**(`FltCreateCommunicationPort`):内核建 `\SandboxMiniFilterPort`,用户态连。端口 SD 只允许 Admin+SYSTEM(防低权限乱下发策略)。三个回调:PortConnect(只允许一个客户端)/ PortDisconnect / PortMessage(收策略下发)。
+      - **策略存储**:`g_policy`(MfPolicyUpdate 结构)+ `KSPIN_LOCK g_policy_lock`(自旋锁保护并发读写)。`IsBlocked` 用大小写不敏感子串包含匹配。
+      - **PortMessage**(用户态→内核策略下发):不信任对端——长度必须正好是 MfPolicyUpdate、msg_type 校验、rule_count ≤ MF_MAX_RULES、逐条 len_chars 夹紧、`__try/__except` 防御非法指针、整表覆盖(自旋锁)。
+    - `mf_protocol.h`:**内核↔用户态共享协议**(两端共用,只用固定宽度类型避免平台头冲突)。两类消息:`kMfAudit`(内核→用户审计)、`kMfPolicySet`(用户→内核策略)。`MfAuditRecord{msg_type,verdict,pid,path_chars,path[512]}`、`MfPolicyUpdate{msg_type,rule_count,rules[32]}`。`#pragma pack(8)`。MF_MAX_PATH_CHARS=512, MF_MAX_RULES=32。
+    - `mf_ctl.cc`:**用户态控制程序**(普通 MSVC,链接 fltlib.lib)。`FilterConnectCommunicationPort` 连端口 → `FilterSendMessage` 下发黑名单 → 循环 `FilterGetMessage` 收审计打印。收消息时 FltMgr 在结构前加 `FILTER_MESSAGE_HEADER`。
+    - `sandbox_minifilter.inf`:安装信息(altitude=370000 / FSFilter)。`sandbox_minifilter.vcxproj`:WDK 驱动工程。
+    - 配套脚本(项目根):`install_mf.bat` / `run_mf.bat` / `uninstall_mf.bat`。验证:`fltmc filters` 看 sandboxmf altitude 370000。
+  - **两种形态**:
+    - 形态 A(审计):不传关键词,只收审计上报(哪个 PID 打开了哪个路径,放行/被拦)。
+    - 形态 B(拦截):传敏感关键词(如 `\sandbox_secret\`),下发黑名单,命中即 `STATUS_ACCESS_DENIED` 内核态拦下。
+  - **M9 编译踩坑(README 已记录,实测 2026-08-19 VS2022 Pro + WDK 10.0.26100)**:
+    1. **MSB8040 需要 Spectre 缓解库**:VS 没装 Spectre-mitigated libs。解法:工程 Globals 加 `<SpectreMitigation>false</SpectreMitigation>` 或命令行 `/p:SpectreMitigation=false`。学习 demo 不需要 Spectre。
+    2. **InfVerif.dll 找不到 / inf2cat 退出 -2**:WDK 的 INF 校验和 .cat 生成步骤(缺 x86\InfVerif.dll + INF 缺 [SourceDisksFiles] 段)。解法:给 INF 补 [SourceDisksNames]/[SourceDisksFiles] 段,并关掉打包 `/p:EnableInf2cat=false /p:GenerateDriverPackage=false`。只影响 .cat 签名产物,不影响 .sys。
+    3. **SignTool 缺 /fd**:编译后自动测试签名失败。解法:工程关掉自动签名(SignMode=Off)。加载到 VM 时用测试证书/testsigning 单独处理。
+    - 结论:.sys 本体编译零 error(仅几个无害 warning:C4819 源码 UTF-8 vs 代码页 936、C4100 未引用参数)。产物 `sandbox_minifilter.sys` 约 8.7 KB。
+  - **M9 内核代码铁律**:
+    1. 不可信输入(用户态下发的策略)全部边界校验后才用——和 M3/M8 IPC 一致。
+    2. 字符串操作用带长度上限的安全版本,杜绝溢出(内核溢出 = 蓝屏/提权漏洞)。
+    3. 分页/非分页内存与 IRQL 匹配:PreCreate 在 PASSIVE_LEVEL,可安全取文件名(分页 API 在 DISPATCH_LEVEL 会崩)。
+    4. 跳过 KernelMode 请求(Data->RequestorMode == KernelMode),只看用户态请求——避免拦内核自身 I/O 导致死锁。
+    5. 策略用 KSPIN_LOCK 保护(PreCreate 可能在不同线程并发调用)。
+    6. FltSendMessage 用短超时(50ms)避免用户态没收时卡住内核。
+    7. 拿不到文件名就放行(FLT_PREOP_SUCCESS_NO_CALLBACK)——不因过滤器故障挡业务。
+  - **M9 在沙箱里的定位**:M0~M8 全是用户态(调 Win32 API,约束靠内核 SRM/Job/EPROCESS 强制执行)。M9 是项目首次进入**内核态**——在 IRP_MJ_CREATE 到达 ntfs.sys 之前就拦下,比 M8 的 NTFS DACL(访问检查阶段)更早、比 M3/M8 的 IPC broker(用户态代劳)更底层。M8 的 DACL 是"客体 ACL 层",M9 是"IRP 派发层",两者互补。M9 同时演示了内核↔用户态通信(FltMgr 通信端口)+ 内核态策略引擎 + 审计上报,是用户态沙箱向内核态延伸的关键一步。
 
 ## 技术约定
 - 使用 `ScopedHandle` 做 HANDLE 的 RAII 管理,避免句柄泄漏。
