@@ -1,7 +1,9 @@
 # AI-Agent Sandbox （Windows）
 
-> 一个**为 AI Agent 提供安全运行环境**的 Windows 沙箱学习/演示工程。  
-> 用现代 C++17 + Win32 底层 API 从零搭建，逐 milestone 覆盖**进程管控 / 文件隔离 / 网络管控 / 注入与反注入 / Windows NT 底层机制** 五大能力块。
+> 一个**为 AI Agent 提供安全运行环境**的 Windows 原生进程级沙箱。
+> 用现代 C++17 + Win32 底层 API 从零搭建，逐 milestone（**M0~M11 已全部完成**）覆盖**进程管控 / 文件隔离 / 网络管控 / 注入与反注入 / Windows NT 底层机制**五大能力块，用户态一路做到内核 Minifilter 驱动。
+>
+> 核心假设：**不赌"模型不作恶"，只在 OS 层把"作恶的爆炸半径"限制死**（defense-in-depth）。
 
 ---
 
@@ -50,29 +52,32 @@
                     └───────────────────────────┘
 ```
 
-### 当前态（M1，已完成）
+### 当前态（M0~M11 全部完成）
 
 ```
-    ┌──────────── m1_demo.exe（Broker 雏形）──────────────┐
-    │                                                     │
-    │  JobManager   +   TokenManager   +   MitigationList │
-    │       │              │(+ Low IL)             │     │
-    │       │              │                       │      │
-    │       └──ProcessLauncher─────────────────────┘      │
-    │                │                               │
-    │      + DesktopIsolation (WinSta+Desktop)            │
-    │                     ▼                    │
-    │   CreateProcessAsUserW│
-    │     (CREATE_SUSPENDED + STARTUPINFOEX│
-    │      + Mitigation Policy + Low IL)                  │
-    │     → AssignProcessToJobObject                      │
-    │     → ResumeThread                                  │
-    └─────────────────────┬───────────────────────────────┘
-                          ▼
-                target.exe（Low IL + 8 项 Mitigation
-                       + 独立 winsta/desktop
-                       + Job 资源上限 + Restricted Token）
+┌───────────────────────── broker（各 m*_demo.exe，沙箱外/有权限）─────────────────────────┐
+│  策略引擎        文件 Broker         WFP 引擎           反注入检测                          │
+│  (M8 白名单)     (M8 代劳+句柄)      (M6 AppID/IP)      (M5 Ldr 通知/线程扫描)              │
+│      ▲                ▲  命名管道 IPC（帧协议 + DuplicateHandle，M3）                        │
+│      │ 起进程         │  + 注入 dns_hook/sandbox_hook（M4/M7）                              │
+│      ▼                ▼                                                                     │
+│  ┌──────────────────────────── target.exe（hello_target，沙箱内）────────────────────────┐ │
+│  │ Job Object(M0) + Restricted Token/Low IL(M0/M1) + AppContainer(M2)                    │ │
+│  │ + 8 项 Mitigation Policy(M1) + Alt WinSta/Desktop(M1)                                 │ │
+│  │ 内部跑 9 项越狱测试（jailbreak-1~9），每项对应一层围栏，基线全 SUCCESS→沙箱化后 BLOCKED │ │
+│  └──────────────────────────────────────────────────────────────────────────────────────┘ │
+└──────────────────────────────────────────┬──────────────────────────────────────────────┘
+                                           │  FltMgr 通信端口（策略下发 + 审计上报）
+                                           ▼
+                         ┌────────────────────────────────────┐
+                         │ sandbox_minifilter.sys（内核，M9）   │
+                         │  IRP_MJ_CREATE PreCreate：审计 + 拦截 │
+                         │  （altitude 370000，STATUS_ACCESS_DENIED）│
+                         └────────────────────────────────────┘
 ```
+
+> 五层围栏：**资源(M0/M1) → 权限(M1/M2) → 能力(M1/M5) → 网络(M2/M6/M7) → 数据(M3/M8/M9)**。
+> M4(攻:注入+hook) 与 M5(守:反注入) 互为镜像，保证沙箱自身不被劫持。
 
 ---
 
@@ -86,12 +91,12 @@
 | D6 | **M3** Broker/Target 双进程 + Named-Pipe IPC | 拆成 `broker.exe` + `target.exe` | W1/W5 | ✅ 完成 |
 | D7-8 | **M4** 注入与 Hook（正向） | `injector.exe` + MinHook 拦截 `CreateFileW` | W4 | ✅ 完成 |
 | D9 | **M5** 反注入与运行时检测 | `LdrRegisterDllNotification` + 模块白名单 + 远程线程检测 | W4 | ✅ 完成 |
-| D10-12 | **M6** WFP 网络管控 | 用户态 WFP：进程 + IP + 端口 + 协议 白/黑名单 | W3 | ✅ |
-| D13 | **M7** 域名维度控制 | 注入 dns_hook.dll 钩 GetAddrInfoW 做域名白名单 + DNS→IP 联动 WFP | W3 | ✅ |
-| D14-15 | **M8** 用户态文件隔离 | Broker 代理受限文件访问 + NTFS ACL 收敛 | W2 | ⏳ |
-| D16-18 | **M9** 内核 Minifilter | `sandbox_flt.sys` PreCreate 按PID + 路径拦截 | W2 | ⏳ |
-| D19 | **M10** 越狱测试套件 | 8~10 个 attacker exe 验证每层防御 | 全部 | ⏳ |
-| D20 | **M11** 交付打包 | 架构图 + JD 关键词映射 + 5 分钟话术 | 全部 | ⏳ |
+| D10-12 | **M6** WFP 网络管控 | 用户态 WFP：进程 + IP + 端口 + 协议 白/黑名单（AppID 形态拦 loopback） | W3 | ✅ 完成 |
+| D13 | **M7** 域名维度控制 | 注入 dns_hook.dll 钩 GetAddrInfoW 做域名白名单 + DNS→IP 联动 WFP | W3 | ✅ 完成 |
+| D14-15 | **M8** 用户态文件隔离 | 文件 Broker 策略引擎（防 TOCTOU + 最小权限句柄）+ NTFS DENY-ACE | W2 | ✅ 完成 |
+| D16-18 | **M9** 内核 Minifilter | `sandbox_minifilter.sys` IRP_MJ_CREATE 审计 + 敏感路径拦截 + 通信端口下发策略 | W2 | ✅ 完成 |
+| D19 | **M10** 越狱测试 + 一键回归 | hello_target 9 项越狱测试 + `run_all.bat` 汇总 PASS/FAIL | 全部 | ✅ 完成 |
+| D20 | **M11** 交付打包 | 顶层 README + `PROJECT_SUMMARY.md` + `package.bat` release zip | 全部 | ✅ 完成 |
 
 **JD 能力块编号**：
 - W1 = 进程管控（Job / Token / IL / AppContainer / PP-PPL / Mitigation）
@@ -102,42 +107,46 @@
 
 ---
 
-## 4. 目录结构（当前 M0）
+## 4. 目录结构（M0~M11 完整态）
 
 ```
 sandbox_demo/
 ├─ CMakeLists.txt           顶层 CMake：分层子目标 + MSVC 硬化选项
-├─ build.bat / run.bat / run_m1.bat / run_baseline.bat      一键脚本
+├─ build.bat                一键编译（用户态部分 → build_m0/）
+├─ run_*.bat                各 milestone 运行脚本（M6/M7-ip 自动提权）
+├─ run_all.bat              一键回归：顺序跑 M0~M8 非破坏性 demo 汇总 PASS/FAIL
+├─ package.bat              打包 release zip（exe/dll/sys/脚本/docs）
+├─ install_mf.bat / run_mf.bat / uninstall_mf.bat   M9 Minifilter 加载/运行/卸载（VM）
 ├─ src/
-│  ├─ common/               无状态工具，所有模块共用
-│  │  ├─ scoped_handle.h    RAII HANDLE 五法则封装
+│  ├─ common/               无状态工具（header-only）
+│  │  ├─ scoped_handle.h    RAII HANDLE 封装
 │  │  ├─ win_error.h        GetLastError → std::error_code
-│  │  └─ logger.h           线程安全宽字符 stdout logger（UTF-16 控制台）
-│  ├─ core/                 沙箱能力砖块
+│  │  └─ logger.h           线程安全宽字符 logger
+│  ├─ core/                 沙箱核心库 sandbox_core
 │  │  ├─ job_manager.{h,cc}       Job Object（W1，M0）
 │  │  ├─ token_manager.{h,cc}     Restricted Token + Low IL（W1，M0/M1）
 │  │  ├─ mitigation.{h,cc}        STARTUPINFOEX + Mitigation Policy（W1，M1）
 │  │  ├─ desktop_iso.{h,cc}       Alternate WinStation+Desktop（W1，M1）
-│  │  └─ process_launcher.{h,cc}  串接 Job+Token+IL+Mitigation+Desktop
-│  └─ demo/
-│     ├─ hello_target.cc         被沙箱化的目标示例（打印 IL 供验证）
-│     ├─ m0_demo.cc              M0 冒烟：Job + Restricted Token
-│     └─ m1_demo.cc              M1 冒烟：+ Low IL + Mitigation + Desktop 隔离
-├─ tests/                   越狱测试用例（M10）
-└─ docs/
-   └─ notes/                每个 milestone 的学习笔记（面试口径）
-      └─ M0.md
-```
-
-后续 milestone 会往下面这些**已经预留好的位置**填代码，架构不再大改：
-```
-src/
-├─ ipc/            (M3) Named-Pipe 传输 + 协议帧 + 分发器
-├─ broker/         (M3+M8) Broker 主程序、Policy Engine、File Broker
-├─ target/         (M3) Target 子程序
-├─ hook/           (M4/5) injector / hook_payload / anti_inject
-├─ network/        (M6/7) WFP 引擎 + DNS Guard
-└─ minifilter/     (M9)内核 sys 独立项目
+│  │  ├─ appcontainer.{h,cc}      AppContainer/LowBox Token（W1，M2）
+│  │  ├─ firewall.{h,cc}          INetFwPolicy2 防火墙规则（W3，M2 加餐）
+│  │  ├─ pipe_server/client.{h,cc}  命名管道 IPC + 帧协议（W5，M3/M8）
+│  │  ├─ injector.{h,cc}          远程线程 DLL 注入（W4，M4/M7）
+│  │  ├─ self_defense.{h,cc}      运行时反注入自检（W4，M5）
+│  │  ├─ wfp_*.{h,cc}             WFP 网络过滤（W3，M6）
+│  │  ├─ file_acl.{h,cc}          NTFS DACL DENY-ACE（W2，M8）
+│  │  └─ process_launcher.{h,cc}  串接所有围栏
+│  ├─ demo/
+│  │  ├─ hello_target.cc          被沙箱化的通用靶子（9 项越狱测试 + --ipc/--selfcheck/--once）
+│  │  ├─ m0_demo.cc ~ m8_denyacl_demo.cc   各 milestone demo 主程序
+│  │  ├─ sandbox_hook.cc          M4 注入垫片（hook CreateFileW）
+│  │  └─ dns_hook.cc              M7 注入垫片（hook GetAddrInfoW）
+│  ├─ minifilter/            M9 内核 Minifilter（WDK 工程，独立编译）
+│  │  ├─ sandbox_minifilter.c/.inf/.vcxproj   驱动本体
+│  │  ├─ mf_protocol.h            内核↔用户共享协议
+│  │  ├─ mf_ctl.cc                用户态控制程序（连端口/下发策略/收审计）
+│  │  └─ README.md                编译 + 加载步骤（含踩坑）
+│  └─ third_party/           vendored MinHook（M4/M7 用）
+└─ docs/notes/               每个 milestone 深度笔记 + 横切基础文档
 ```
 
 ---
@@ -164,23 +173,31 @@ cmake -S . -B build_m0 -A x64
 cmake --build build_m0 --config Debug
 ```
 
-### 运行 M0
+### 运行
 
 ```bat
-:: 用 M0 sandbox 拉起 notepad
-run.bat
+:: 一键回归：顺序跑 M0~M8 全部非破坏性 demo（--once 跑完即退），汇总 PASS/FAIL
+run_all.bat
 
-:: 或指定其他 exe
-run.bat "C:\Windows\System32\calc.exe"
+:: 单独跑某个 milestone（示例）
+run.bat                :: M0：用最小沙箱拉起 notepad
+run_m1.bat             :: M1：Low IL + Mitigation + Alt Desktop
+run_m6_appid.bat       :: M6：WFP 按 exe 拦全部 outbound（需管理员，脚本自动提权）
+run_m8.bat             :: M8：文件 broker 策略引擎
+run_m8_denyacl.bat     :: M8：DENY-ACE 从外部剥夺写权限
+
+:: M9 内核 Minifilter（需 WDK 编译 + 在 VM 里加载，勿在主力机跑！见 src/minifilter/README.md）
+install_mf.bat → run_mf.bat → uninstall_mf.bat
+
+:: 打包可分发的 release zip
+package.bat
 ```
 
-预期输出：
+预期输出（M0 示例）：
 ```
 [+] JobManager: job created. process_limit=4 mem_limit_mb=256 cpu_rate=20%
 [+] TokenManager: restricted token created (all privileges removed)
 [+] ProcessLauncher: pid=xxxxx tid=xxxxx image=C:\Windows\System32\notepad.exe
-[+] Active processes in job: 2
-[+]   in-job PID = xxxxx
 [+] Target exited with code=0
 ```
 
@@ -436,7 +453,73 @@ m7_demo → 注入 dns_hook.dll → 在 target 内 hook GetAddrInfoW
 
 **运行**：`run_m7.bat`（形态 A，看 target 的 jailbreak-8 两行 + DebugView/`%TEMP%\dns_hook_log.txt`）/ `run_m7_ip.bat`（形态 C，需管理员）。
 
-### ⏳ M8 及以后 — 见 Roadmap 表
+### ✅ M8 — 用户态文件 Broker（策略引擎 + DENY-ACE 双路线）
+
+**把 M3 那个"单目录只读"的文件 broker 骨架升级成生产级**，并演示与之互补的第二条路线。对应 JD 的"敏感路径隔离 / 文件读写审计 / 权限收敛"。
+
+**形态 A — 文件 Broker 策略引擎增强**（在 M3 骨架上补齐四点）：
+
+1. **多规则白名单读写分离** — `FilePolicyRule{dir_prefix, allow_write}`，只读目录 vs 可写目录；命中规则后再判 access 维度（`kDenied` 越权 vs `kAccessNotAllowed` 命中只读规则但请求写）
+2. **读/写/创建多操作** — `OpenFileRequest` 加 `access_mode`/`disposition`，协议 version 提到 2 但**向后兼容 M3 v1**（按 body 长度自适应）
+3. **防 TOCTOU** ⭐ — 先开句柄再 `GetFinalPathNameByHandleW` 拿"事后真身"（解 symlink/junction/短名/大小写）校验白名单，**校验对象 = 使用对象**
+4. **最小权限句柄回传** — DuplicateHandle 按策略最小 access，不再 `DUPLICATE_SAME_ACCESS`
+
+**形态 B — DENY-ACE 从外部剥夺写权限**（互补路线）：broker 起 target 前用 `SetNamedSecurityInfo` 给敏感目录追加针对 target 用户 SID 的 **DENY-WRITE ACE**（含目录+文件继承），target 自己 `CreateFileW(写)` 被内核 DACL 检查一票否决（gle=5）。靠"restricted token 用户 SID 不变"定位 target，析构自动回滚。
+
+#### M8 实测（形态 A 四点全绿）
+
+| 观察点 | target 侧结果 | 验证的增强点 |
+|---|---|---|
+| 只读目录**读** | `打开 hello.txt -> OK，读到 30 字节` | 白名单命中放行 |
+| 越权路径**读** | `BLOCKED（越权路径）` | GetFinalPathNameByHandle 真身校验 |
+| 可写目录**写/创建** | `写 -> OK，写入 38 字节` | 读写分离 + 多操作（v2 协议 access=1/dispo=2） |
+| 只读目录**写** | `BLOCKED（命中只读规则）⭐` | 两级判定 kAccessNotAllowed |
+
+形态 B：jailbreak-9 从"目录不存在 gle=3"变成"DENY-ACE 挡下 gle=5"——**gle 3→5 就是形态 B 的核心证据**。
+
+**两条路线哲学**：A = 主动授予（默认全禁 broker 发句柄，Chromium sandbox 套路，细粒度），B = 被动剥夺（改客体 ACL 从外部收权，目录级），纵深防御常一起用。
+
+详见 [`docs/notes/M8.md`](sandbox_demo/docs/notes/M8.md)。
+
+**运行**：`run_m8.bat`（形态 A）/ `run_m8_denyacl.bat`（形态 B）。
+
+### ✅ M9 — 内核 Minifilter 文件过滤驱动（审计 + 拦截，W2 皇冠）
+
+**M8 的用户态防线能被绕过**（target 直接 `NtCreateFile` 跳过 broker、有 `WRITE_DAC` 就能改掉 DENY-ACE、TOCTOU），M9 把文件管控**下沉到内核 IRP 层兜底**——挂 FltMgr、altitude 370000，在 `IRP_MJ_CREATE` 的 Pre 回调里拦**任何进程任何路径**，绕不过。形态 A+B 合一（审计上报 + 敏感路径拦截 + 用户态下发策略）。
+
+**关键实现点**：
+
+1. **只拦用户态请求** — `Data->RequestorMode == KernelMode` 直接放行（内核自身 I/O 不干扰）
+2. **规范化路径** — `FltGetFileNameInformation(FILE_NAME_NORMALIZED)`，拿到的是已解析短名/符号链接的最终对象——**内核过滤天然免疫 TOCTOU/symlink 绕过**（M8 要靠 GetFinalPathNameByHandle 补）
+3. **拦截 = `FLT_PREOP_COMPLETE` + `STATUS_ACCESS_DENIED`** — 命中黑名单时请求不再下发给 ntfs.sys，从内核层挡死
+4. **通信端口 + SD 收紧** — `FltCreateCommunicationPort` 建端口，只允许 Admin/SYSTEM 连；审计走 `FltSendMessage`(内核→用户)，策略下发走 `PortMessage`(用户→内核)
+5. **内核铁律** — 不信任对端（PortMessage 严格校验 + `__try/__except`）、防溢出（len 夹紧）、并发用 `KSPIN_LOCK`、回调在 PASSIVE_LEVEL
+
+#### M9 交付状态
+
+- **驱动本体 `sandbox_minifilter.sys` 已在本机 WDK 环境编译通过**（VS2022 + WDK 10.0.26100，C 代码零 error）；用户态控制程序 `mf_ctl` 亦编译通过。
+- 编译踩的三个环境/打包坑（非代码问题）：① MSB8040 需 Spectre 库 → 关 `SpectreMitigation`；② InfVerif/inf2cat → 补 INF `[SourceDisksFiles]` 段 + 关打包；③ SignTool 缺 /fd → 关自动签名。
+- **加载/拦截实测在 VM 里做**（testsigning + `fltmc load`，内核 bug = 蓝屏，务必 VM 快照）。
+
+#### M9 vs M8 纵深关系
+
+| 维度 | M8 用户态 | M9 内核 Minifilter |
+|---|---|---|
+| 拦截层 | 用户态 broker / DACL | 内核 IRP_MJ_CREATE |
+| 能否绕过 | 可（NtCreateFile / 改 DACL） | 否（所有用户态 create 都过 FltMgr） |
+| 防 TOCTOU | 靠 GetFinalPathNameByHandle 补 | 天生：内核拿到的就是最终对象 |
+| 崩溃代价 | 进程崩 | 蓝屏（须 VM） |
+
+详见 [`docs/notes/M9.md`](sandbox_demo/docs/notes/M9.md) 与 [`src/minifilter/README.md`](sandbox_demo/src/minifilter/README.md)。
+
+### ✅ M10-11 — 测试 + 交付打包
+
+- **`run_all.bat`** — 一键回归：自动提权 + 建目录 + 顺序跑 M0~M8 全部非破坏性 demo（`--once` 跑完即退）+ 按退出码打 PASS/FAIL + 汇总（跳过需 VM 的 M9）
+- **顶层 `README.md`（本文档）+ `sandbox_demo/README.md`** — 项目门面 / 五层围栏全景 / M0~M9 一览 / JD 能力映射
+- **`docs/notes/PROJECT_SUMMARY.md`** — 踩坑合集（按 M0~M9 分类）+ 6 条关键技术决策 + 面试 Q&A 大全
+- **`package.bat`** — 收拢 exe/dll/sys/inf + 全部脚本 + docs 成 `release/sandbox_demo_release_YYYYMMDD.zip`（内置 Compress-Archive，无需 7-zip）
+
+**全部 12 个 milestone（M0~M11）完成**：从用户态权限收敛一路做到内核 Minifilter，五层纵深完整，每层有 demo 验证 + 深度笔记 + 面试话术。
 
 ---
 
@@ -449,6 +532,16 @@ m7_demo → 注入 dns_hook.dll → 在 target 内 hook GetAddrInfoW
 - **Minifilter** — 文件系统过滤驱动模型
 
 本工程的最终形态**不追求覆盖 Chromium sandbox 全部特性**，目标是"覆盖 JD 5 大能力块 + 每个能力块有一个可讲的原型"，作为**面试作品集**使用。
+
+### 深度文档索引（`sandbox_demo/docs/notes/`）
+
+- **`why_sandbox_for_agent.md`** ⭐ 工程动机总纲（讲项目先看这篇）
+- **`RECALL_CARDS.md`** 快速回忆卡（主动回忆自测，突然想起项目时快速唤醒知识点）
+- `M0.md` ~ `M9.md` — 每个 milestone 的完整笔记（原理 + 踩坑 + 实测 + 话术）
+- `kernel_objects_101.md` — 横切基础：Object Manager / HANDLE / SeAccessCheck / PEB / 命名管道
+- `minhook_trampoline_deepdive.md` — MinHook inline hook 底层深挖
+- `sandbox_vs_codex.md` — 本项目 vs OpenAI Codex Sandbox 对比
+- `tools_cheatsheet.md` — 调试工具速查（WinDbg / Process Explorer / WinObj）
 
 ---
 
